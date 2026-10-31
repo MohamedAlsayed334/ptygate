@@ -122,6 +122,55 @@ token and session are readable by anyone who can sniff your network. That is
 usually fine at home; on shared wifi, use the SSH tunnel or Tailscale instead.
 
 
+## Running in Docker
+
+Inside a container, `172.17.x` / `172.18.x` / whatever `hostname -I` says are
+**container-network** addresses. A phone in your house cannot reach them, no
+matter what the app binds to. Publish the port on the host and use the *host's*
+LAN address:
+
+```bash
+docker run --rm -it -p 8080:8080 \
+  -e TERMINAL_TOKEN='some-long-random-string' \
+  -e HOST=0.0.0.0 \
+  -v "$PWD":/app -w /app node:24 bash -lc 'npm install && npm start'
+```
+
+```yaml
+# compose.yaml
+services:
+  terminal:
+    image: node:24
+    working_dir: /app
+    volumes: [".:/app"]
+    command: bash -lc "npm install && npm start"
+    ports: ["8080:8080"]
+    environment:
+      TERMINAL_TOKEN: "some-long-random-string"
+      HOST: "0.0.0.0"
+```
+
+Two things people get wrong here:
+
+- `npm start` binds `127.0.0.1` **inside** the container, so `-p 8080:8080`
+  can't reach it. Use `HOST=0.0.0.0` / `npm run lan` inside containers.
+- Opening `http://172.18.0.162:8080` from your host may work on Linux, but it is
+  not a LAN address. Use the host's real IP (`ip addr` on the host, usually
+  `192.168.x.x`), not the container's.
+
+The private-network guard still works after publishing: traffic arrives from
+`192.168.x.x` (or the docker gateway `172.17.0.1`), both private.
+
+If the image runs as an unprivileged UID with no `/etc/passwd` entry, every
+shell shows `I have no name!` and `whoami`/`ps` fail with
+`cannot find name for user ID 999`. That is the container image, not this app.
+Fix it in the image:
+
+```dockerfile
+RUN echo "user:x:999:999::/home/user:/bin/bash" >> /etc/passwd \
+ && mkdir -p /home/user && chown 999:999 /home/user
+```
+
 ## Security — read this before pointing it at a VPS
 
 This app is **remote code execution as a feature**. Anything that can reach the

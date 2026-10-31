@@ -1,5 +1,6 @@
 import http from "node:http";
 import os from "node:os";
+import fs from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
 import util from "node:util";
@@ -72,12 +73,43 @@ const TOKEN_ENV = process.env.TERMINAL_TOKEN;
 let TOKEN = TOKEN_ENV;
 if (!TOKEN) {
   TOKEN = crypto.randomBytes(24).toString("base64url");
-  log(`\n  Access token (generated): ${TOKEN}`);
-  log("  Set TERMINAL_TOKEN=<value> to keep it across restarts.\n");
 } else if (TOKEN.length < 16) {
   process.stderr.write("TERMINAL_TOKEN must be at least 16 characters. Refusing to start.\n");
   process.exit(1);
 }
+
+/* ------------------------------------------------------------ environment */
+
+function detectContainer() {
+  try {
+    if (fs.existsSync("/.dockerenv")) return "docker";
+    if (fs.existsSync("/run/.containerenv")) return "podman";
+    const cgroup = fs.readFileSync("/proc/1/cgroup", "utf8");
+    if (/(docker|kubepods|containerd|lxc)/.test(cgroup)) return "container";
+  } catch {
+    /* not a container, or unreadable */
+  }
+  return null;
+}
+
+const IN_CONTAINER = detectContainer();
+
+let CURRENT_USER = null;
+try {
+  CURRENT_USER = os.userInfo();
+} catch {
+  CURRENT_USER = null; // uid has no /etc/passwd entry
+}
+
+// os.homedir() can throw (or point at a missing dir) when the uid is unknown,
+// which would make pty.spawn fail. Fall back to the working directory.
+let HOME_DIR;
+try {
+  HOME_DIR = os.homedir();
+} catch {
+  HOME_DIR = null;
+}
+if (!HOME_DIR || !fs.existsSync(HOME_DIR)) HOME_DIR = process.cwd();
 
 /* -------------------------------------------------------- ip / network guard */
 
@@ -370,9 +402,10 @@ wss.on("connection", (ws, req, sid) => {
     name: "xterm-256color",
     cols: 100,
     rows: 30,
-    cwd: os.homedir(),
+    cwd: HOME_DIR,
     env: {
       ...process.env,
+      HOME: HOME_DIR,
       TERM: "xterm-256color",
       COLORTERM: "truecolor",
       LANG: process.env.LANG || "C.UTF-8",
@@ -478,16 +511,17 @@ function startLocalConsole() {
     name: process.env.TERM || "xterm-256color",
     cols,
     rows,
-    cwd: os.homedir(),
+    cwd: HOME_DIR,
     env: {
       ...process.env,
+      HOME: HOME_DIR,
       TERM: process.env.TERM || "xterm-256color",
       LANG: process.env.LANG || "C.UTF-8",
     },
   });
 
   localSession = term;
-  log(`[console] local shell pid=${term.pid} (Ctrl+C goes to the shell, type exit to leave)`);
+  log(`[console] local shell pid=${term.pid} -- keystrokes go to this shell; type "exit" to come back`);
 
   // From here on, logs are buffered so they don't wreck the terminal.
   consoleActive = true;
@@ -552,23 +586,36 @@ function startLocalConsole() {
 
 /* ------------------------------------------------------------------ boot */
 
-const urls = [];
-if (HOST === "0.0.0.0" || HOST === "::") {
-  for (const addrs of Object.values(os.networkInterfaces())) {
+function hostUrls(port) {
+  const out = [];
+  for (const [name, addrs] of Object.entries(os.networkInterfaces())) {
     for (const a of addrs || []) {
-      if (a.family === "IPv4" && !a.internal) {
-        urls.push(`http://${a.address}:${PORT}`);
-      }
+      if (a.family !== "IPv4" || a.internal) continue;
+      // docker0, br-xxxx, veth*, virbr0 ... and (inside any container) the
+      // container's own eth0 are only reachable inside the container network,
+      // so they are useless as "open this on your phone" addresses.
+      const containerNet =
+        IN_CONTAINER || /^(docker|br-|veth|virbr|podman|cni)/.test(name);
+      out.push({ name, url: `http://${a.address}:${port}`, containerNet });
     }
   }
+  out.sort((a, b) => Number(a.containerNet) - Number(b.containerNet));
+  return out;
 }
+
+const urls = hostUrls(PORT);
 
 server.listen(PORT, HOST, () => {
   log("");
   log(`  web terminal listening on http://${HOST}:${PORT}`);
-  if (urls.length) {
-    log("  reachable from your house at:");
-    for (const u of urls) log(`    ${u}`);
+  const wildcard = HOST === "0.0.0.0" || HOST === "::";
+  if (urls.length && wildcard) {
+    log("  addresses on this machine:");
+    for (const u of urls) {
+      log(
+        `    ${u.url}${u.containerNet ? `   (${u.name}: container network, not your LAN)` : `   (${u.name})`}`,
+      );
+    }
   }
   if (HOST !== "127.0.0.1" && HOST !== "localhost" && HOST !== "::1") {
     log(
@@ -577,8 +624,29 @@ server.listen(PORT, HOST, () => {
         : "  WARNING: ALLOW_PRIVATE_ONLY=0 -- anyone who can route to this port may connect.",
     );
   }
+  log(`  access token: ${TOKEN}${TOKEN_ENV ? "" : "   (generated for this run)"}`);
   log(`  shell: ${SHELL}`);
-  if (!TOKEN_ENV) log("  token: see above (generated for this run)");
+
+  if (IN_CONTAINER) {
+    log("");
+    log(`  running inside a ${IN_CONTAINER} container. Addresses such as 172.17.x / 172.18.x`);
+    log("  only exist inside the container network; another device in your house cannot");
+    log("  reach them. To open this from a phone or laptop:");
+    log('    docker run -p 8080:8080 ...        or compose:  ports: ["8080:8080"]');
+    log("    then use the HOST machine's LAN IP (e.g. http://192.168.1.50:8080)");
+    log("    or: docker run --network host ...   (container shares the host's network)");
+    log("    or: ssh -L 8080:127.0.0.1:8080 user@host");
+  }
+  if (!CURRENT_USER) {
+    log("");
+    log(`  warning: uid ${process.getuid?.()} has no /etc/passwd entry.`);
+    log("  Shells will show 'I have no name!' and whoami/ps will fail.");
+    log("  Fix inside the container, as root:");
+    log(
+      `    echo "user:x:${process.getuid?.()}:${process.getgid?.()}::/home/user:/bin/bash" >> /etc/passwd`,
+    );
+    log(`    mkdir -p /home/user && chown ${process.getuid?.()}:${process.getgid?.()} /home/user`);
+  }
   log("");
 
   if (LOCAL_CONSOLE) {
