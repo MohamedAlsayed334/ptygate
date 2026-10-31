@@ -2,6 +2,7 @@ import http from "node:http";
 import os from "node:os";
 import path from "node:path";
 import crypto from "node:crypto";
+import util from "node:util";
 import { fileURLToPath } from "node:url";
 
 import express from "express";
@@ -13,9 +14,25 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 /* ------------------------------------------------------------------ config */
 
 const PORT = Number(process.env.PORT || 8080);
-// Default is loopback only on purpose. Reach it through an SSH tunnel,
-// Tailscale, or a TLS reverse proxy -- never expose this port raw.
-const HOST = process.env.HOST || "127.0.0.1";
+
+// Reachable from:
+//   Loopback is the safe default. `LAN=1` (or an explicit HOST) binds all
+//   interfaces so phones/laptops on the same wifi can connect.
+const WANT_LAN = process.env.LAN === "1" || process.env.LAN === "true";
+const HOST = process.env.HOST || (WANT_LAN ? "0.0.0.0" : "127.0.0.1");
+
+// `--console` puts you in a shell in *this* terminal, alongside the web UI.
+const LOCAL_CONSOLE =
+  process.argv.includes("--console") || process.env.LOCAL_CONSOLE === "1";
+
+// In LAN mode, only private/LAN addresses may connect unless you override it.
+// This means "reachable from my house, not from the internet".
+const ALLOW_PRIVATE_ONLY = process.env.ALLOW_PRIVATE_ONLY !== "0";
+const ALLOWED_IPS = (process.env.ALLOWED_IPS || "")
+  .split(",")
+  .map((s) => s.trim())
+  .filter(Boolean);
+
 const SHELL = process.env.SHELL_BIN || process.env.SHELL || "/bin/bash";
 const SECURE_COOKIE = process.env.COOKIE_SECURE === "1";
 
@@ -24,14 +41,108 @@ const MAX_PTYS_TOTAL = 8;
 const MAX_PTYS_PER_SESSION = 4;
 const MAX_INPUT_BYTES = 64 * 1024;
 
-let TOKEN = process.env.TERMINAL_TOKEN;
+/* ----------------------------------------------------------------- logging */
+
+// While the local console owns the terminal, stray log lines would corrupt it.
+// Buffer them and print on exit instead.
+let consoleActive = false;
+const logBuffer = [];
+const MAX_LOG_BUFFER = 200;
+
+function log(...args) {
+  const line = util.format(...args);
+  if (consoleActive) {
+    logBuffer.push(line);
+    if (logBuffer.length > MAX_LOG_BUFFER) logBuffer.shift();
+    return;
+  }
+  // Always stderr so stdout stays clean for the PTY bridge.
+  process.stderr.write(line + "\n");
+}
+
+function flushLogBuffer() {
+  if (!logBuffer.length) return;
+  process.stderr.write("\n--- server log while the local shell was open ---\n");
+  for (const line of logBuffer) process.stderr.write(line + "\n");
+  process.stderr.write("--- end of buffered log ---\n\n");
+  logBuffer.length = 0;
+}
+
+const TOKEN_ENV = process.env.TERMINAL_TOKEN;
+let TOKEN = TOKEN_ENV;
 if (!TOKEN) {
   TOKEN = crypto.randomBytes(24).toString("base64url");
-  console.log(`\n  Access token (generated): ${TOKEN}`);
-  console.log("  Set TERMINAL_TOKEN=<value> to keep it across restarts.\n");
+  log(`\n  Access token (generated): ${TOKEN}`);
+  log("  Set TERMINAL_TOKEN=<value> to keep it across restarts.\n");
 } else if (TOKEN.length < 16) {
-  console.error("TERMINAL_TOKEN must be at least 16 characters. Refusing to start.");
+  process.stderr.write("TERMINAL_TOKEN must be at least 16 characters. Refusing to start.\n");
   process.exit(1);
+}
+
+/* -------------------------------------------------------- ip / network guard */
+
+function normalizeIp(raw) {
+  if (!raw) return "";
+  if (raw.startsWith("::ffff:")) return raw.slice(7);
+  return raw;
+}
+
+function ipv4ToInt(ip) {
+  const parts = ip.split(".");
+  if (parts.length !== 4) return null;
+  let n = 0;
+  for (const p of parts) {
+    if (!/^\d{1,3}$/.test(p)) return null;
+    const v = Number(p);
+    if (v > 255) return null;
+    n = (n << 8) | v;
+  }
+  return n >>> 0;
+}
+
+function cidrMatch(ip, cidr) {
+  const slash = cidr.indexOf("/");
+  const base = slash === -1 ? cidr : cidr.slice(0, slash);
+  const bits = slash === -1 ? 32 : Number(cidr.slice(slash + 1));
+  const a = ipv4ToInt(ip);
+  const b = ipv4ToInt(base);
+  if (a === null || b === null || !Number.isInteger(bits) || bits < 0 || bits > 32) {
+    return false;
+  }
+  const mask = bits === 0 ? 0 : (0xffffffff << (32 - bits)) >>> 0;
+  return (a & mask) === (b & mask);
+}
+
+const PRIVATE_V4 = [
+  "10.0.0.0/8",
+  "172.16.0.0/12",
+  "192.168.0.0/16",
+  "127.0.0.0/8",
+  "169.254.0.0/16", // link-local
+  "100.64.0.0/10", // CGNAT (also what Tailscale hands out)
+];
+
+function isPrivateIp(raw) {
+  const ip = normalizeIp(raw);
+  if (!ip) return false;
+  if (ip === "::1" || ip === "0.0.0.0") return true;
+  if (ip.includes(":")) {
+    const low = ip.toLowerCase();
+    // unique-local (fc00::/7) and link-local (fe80::/10)
+    return /^f[cd]/.test(low) || /^fe[89ab]/.test(low);
+  }
+  return PRIVATE_V4.some((c) => cidrMatch(ip, c));
+}
+
+function ipAllowed(raw) {
+  const ip = normalizeIp(raw);
+  if (ALLOWED_IPS.length > 0) {
+    return ALLOWED_IPS.some((entry) =>
+      entry.includes("/") ? cidrMatch(ip, entry) : normalizeIp(entry) === ip,
+    );
+  }
+  if (ALLOW_PRIVATE_ONLY) return isPrivateIp(ip);
+  return true;
 }
 
 /* ---------------------------------------------------------------- sessions */
@@ -127,6 +238,21 @@ function sessionCookie(sid, maxAgeMs) {
 
 const app = express();
 app.disable("x-powered-by");
+
+// Network guard runs before everything else, including the login page.
+app.use((req, res, next) => {
+  const ip = req.socket.remoteAddress;
+  if (ipAllowed(ip)) return next();
+  log(`[deny] ${normalizeIp(ip)} is outside the allowed ranges`);
+  res
+    .status(403)
+    .type("text")
+    .send(
+      "Forbidden: this terminal only accepts connections from your local network.\n" +
+        "Set ALLOW_PRIVATE_ONLY=0 or ALLOWED_IPS=<cidr,...> to change that.\n",
+    );
+});
+
 app.use(express.urlencoded({ extended: false, limit: "8kb" }));
 
 // Login page + auth endpoints -------------------------------------------
@@ -137,19 +263,19 @@ app.get("/login", (req, res) => {
 });
 
 app.post("/login", (req, res) => {
-  const ip = req.socket.remoteAddress || "unknown";
+  const ip = normalizeIp(req.socket.remoteAddress) || "unknown";
   if (isLockedOut(ip)) {
     return res.status(429).send("Too many attempts. Try again later.");
   }
   if (!tokenMatches(req.body?.token)) {
     recordFail(ip);
-    console.log(`[auth] failed login from ${ip}`);
+    log(`[auth] failed login from ${ip}`);
     return res.redirect("/login?error=1");
   }
   loginFails.delete(ip);
   const sid = createSession();
   res.setHeader("Set-Cookie", sessionCookie(sid, SESSION_TTL_MS));
-  console.log(`[auth] login ok from ${ip}`);
+  log(`[auth] login ok from ${ip}`);
   res.redirect("/");
 });
 
@@ -203,6 +329,11 @@ server.on("upgrade", (req, socket, head) => {
   }
   if (url.pathname !== "/ws") return socket.destroy();
 
+  if (!ipAllowed(req.socket.remoteAddress)) {
+    socket.write("HTTP/1.1 403 Forbidden\r\n\r\n");
+    return socket.destroy();
+  }
+
   // Same-origin check: blocks cross-site WebSocket hijacking.
   const origin = req.headers.origin;
   if (origin) {
@@ -231,7 +362,7 @@ server.on("upgrade", (req, socket, head) => {
 });
 
 wss.on("connection", (ws, req, sid) => {
-  const ip = req.socket.remoteAddress;
+  const ip = normalizeIp(req.socket.remoteAddress);
   ptyCount += 1;
   ptyCountBySession.set(sid, (ptyCountBySession.get(sid) || 0) + 1);
 
@@ -248,7 +379,7 @@ wss.on("connection", (ws, req, sid) => {
     },
   });
 
-  console.log(`[pty] open pid=${term.pid} from ${ip}`);
+  log(`[pty] open pid=${term.pid} from ${ip}`);
 
   const send = (msg) => {
     if (ws.readyState === ws.OPEN) ws.send(JSON.stringify(msg));
@@ -294,7 +425,7 @@ wss.on("connection", (ws, req, sid) => {
     } catch {
       /* already dead */
     }
-    console.log(`[pty] closed pid=${term.pid}`);
+    log(`[pty] closed pid=${term.pid}`);
   };
 
   ws.on("close", cleanup);
@@ -324,22 +455,151 @@ wss.on("connection", (ws) => {
   });
 });
 
+/* ---------------------------------------------------------- local console */
+
+// Spawns a shell in the terminal you started the server from and bridges it to
+// stdin/stdout. Ctrl+C inside the shell goes to the shell (raw mode), so type
+// `exit` to come back to the server, or press Ctrl+C at the prompt to stop it.
+let localSession = null;
+let consoleStarting = false;
+
+function startLocalConsole() {
+  if (consoleStarting || localSession) return;
+  if (!process.stdin.isTTY || !process.stdout.isTTY) {
+    log("  --console needs an interactive terminal; running headless instead.");
+    return;
+  }
+
+  consoleStarting = true;
+  const cols = process.stdout.columns || 100;
+  const rows = process.stdout.rows || 30;
+
+  const term = pty.spawn(SHELL, ["-l"], {
+    name: process.env.TERM || "xterm-256color",
+    cols,
+    rows,
+    cwd: os.homedir(),
+    env: {
+      ...process.env,
+      TERM: process.env.TERM || "xterm-256color",
+      LANG: process.env.LANG || "C.UTF-8",
+    },
+  });
+
+  localSession = term;
+  log(`[console] local shell pid=${term.pid} (Ctrl+C goes to the shell, type exit to leave)`);
+
+  // From here on, logs are buffered so they don't wreck the terminal.
+  consoleActive = true;
+  process.stdin.setRawMode(true);
+  process.stdin.resume();
+
+  const onStdin = (chunk) => {
+    try {
+      term.write(chunk.toString());
+    } catch {
+      /* pty gone */
+    }
+  };
+  process.stdin.on("data", onStdin);
+
+  const onPtyData = (data) => process.stdout.write(data);
+  term.onData(onPtyData);
+
+  const onResize = () => {
+    if (!process.stdout.columns) return;
+    try {
+      term.resize(process.stdout.columns, process.stdout.rows || 30);
+    } catch {
+      /* pty gone */
+    }
+  };
+  process.stdout.on("resize", onResize);
+
+  let restored = false;
+  const restore = () => {
+    if (restored) return;
+    restored = true;
+    consoleActive = false;
+    localSession = null;
+    consoleStarting = false;
+    process.stdin.off("data", onStdin);
+    process.stdout.off("resize", onResize);
+    try {
+      process.stdin.setRawMode(false);
+    } catch {
+      /* not a tty anymore */
+    }
+    process.stdin.pause();
+  };
+
+  term.onExit(() => {
+    restore();
+    flushLogBuffer();
+    process.stderr.write(
+      "\n  local shell exited. The web server is still running.\n" +
+        "  press Enter for a new shell, or Ctrl+C to stop the server.\n",
+    );
+    process.stdin.resume();
+    process.stdin.once("data", () => {
+      process.stdin.pause();
+      startLocalConsole();
+    });
+  });
+
+  consoleStarting = false;
+}
+
 /* ------------------------------------------------------------------ boot */
 
+const urls = [];
+if (HOST === "0.0.0.0" || HOST === "::") {
+  for (const addrs of Object.values(os.networkInterfaces())) {
+    for (const a of addrs || []) {
+      if (a.family === "IPv4" && !a.internal) {
+        urls.push(`http://${a.address}:${PORT}`);
+      }
+    }
+  }
+}
+
 server.listen(PORT, HOST, () => {
-  console.log(`\n  web terminal on http://${HOST}:${PORT}`);
-  console.log(`  shell: ${SHELL}`);
+  log("");
+  log(`  web terminal listening on http://${HOST}:${PORT}`);
+  if (urls.length) {
+    log("  reachable from your house at:");
+    for (const u of urls) log(`    ${u}`);
+  }
   if (HOST !== "127.0.0.1" && HOST !== "localhost" && HOST !== "::1") {
-    console.log(
-      "  WARNING: listening on a non-loopback address. Put TLS + real auth in front of it.",
+    log(
+      ALLOW_PRIVATE_ONLY
+        ? "  LAN mode: only private-network addresses may connect (ALLOW_PRIVATE_ONLY=1)."
+        : "  WARNING: ALLOW_PRIVATE_ONLY=0 -- anyone who can route to this port may connect.",
     );
   }
-  console.log("");
+  log(`  shell: ${SHELL}`);
+  if (!TOKEN_ENV) log("  token: see above (generated for this run)");
+  log("");
+
+  if (LOCAL_CONSOLE) {
+    startLocalConsole();
+  } else {
+    log("  tip: run with --console to also get a shell in this terminal.");
+    log("");
+  }
 });
 
 for (const sig of ["SIGINT", "SIGTERM"]) {
   process.on(sig, () => {
-    console.log("\nshutting down");
+    flushLogBuffer();
+    process.stderr.write("\nshutting down\n");
+    if (localSession) {
+      try {
+        localSession.kill();
+      } catch {
+        /* ignore */
+      }
+    }
     for (const ws of wss.clients) ws.terminate();
     server.close(() => process.exit(0));
     setTimeout(() => process.exit(0), 3000).unref();
