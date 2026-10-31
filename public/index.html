@@ -1,0 +1,218 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>terminal</title>
+    <link rel="stylesheet" href="/assets/xterm.css" />
+    <style>
+      :root {
+        --bg: #0b0e13;
+        --bar: #121722;
+        --line: #222937;
+        --text: #c9d1d9;
+        --muted: #6b7688;
+        --ok: #3fb950;
+        --warn: #d29922;
+        --bad: #f85149;
+      }
+      * { box-sizing: border-box; }
+      html, body { height: 100%; margin: 0; }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        display: flex;
+        flex-direction: column;
+        overflow: hidden;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        padding: 8px 12px;
+        background: var(--bar);
+        border-bottom: 1px solid var(--line);
+        flex: 0 0 auto;
+      }
+      .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--muted); }
+      .dot.on { background: var(--ok); box-shadow: 0 0 8px var(--ok); }
+      .dot.off { background: var(--bad); }
+      #status { color: var(--muted); }
+      .spacer { flex: 1; }
+      button {
+        font: inherit;
+        color: var(--text);
+        background: #1b2231;
+        border: 1px solid var(--line);
+        border-radius: 6px;
+        padding: 4px 10px;
+        cursor: pointer;
+      }
+      button:hover { background: #232c3d; }
+      #wrap { flex: 1 1 auto; min-height: 0; padding: 6px 4px 0 10px; }
+      .xterm .xterm-viewport { background: transparent !important; }
+      #banner {
+        display: none;
+        padding: 6px 12px;
+        background: #2a1f00;
+        color: var(--warn);
+        border-bottom: 1px solid #4a3800;
+      }
+      #banner.show { display: block; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <span class="dot off" id="dot"></span>
+      <span id="status">connecting...</span>
+      <span class="spacer"></span>
+      <button id="reconnect" type="button">reconnect</button>
+      <form method="post" action="/logout" style="margin:0">
+        <button type="submit">log out</button>
+      </form>
+    </header>
+
+    <div id="banner"></div>
+    <div id="wrap"></div>
+
+    <script src="/assets/xterm.js"></script>
+    <script src="/assets/addon-fit.js"></script>
+    <script>
+      const dot = document.getElementById("dot");
+      const statusEl = document.getElementById("status");
+      const banner = document.getElementById("banner");
+
+      function setStatus(text, state) {
+        statusEl.textContent = text;
+        dot.className = "dot " + (state || "");
+      }
+
+      function showBanner(text) {
+        banner.textContent = text;
+        banner.classList.add("show");
+      }
+
+      const term = new Terminal({
+        cursorBlink: true,
+        fontSize: 14,
+        fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
+        scrollback: 5000,
+        theme: {
+          background: "#0b0e13",
+          foreground: "#c9d1d9",
+          cursor: "#3fb950",
+          selectionBackground: "#2d3a4f",
+          black: "#0b0e13",
+          red: "#f85149",
+          green: "#3fb950",
+          yellow: "#d29922",
+          blue: "#58a6ff",
+          magenta: "#bc8cff",
+          cyan: "#39c5cf",
+          white: "#b1bac4",
+        },
+      });
+
+      const fit = new FitAddon.FitAddon();
+      term.loadAddon(fit);
+      term.open(document.getElementById("wrap"));
+      fit.fit();
+      term.focus();
+
+      let ws = null;
+      let attempt = 0;
+      let manual = false;
+
+      function sendResize() {
+        try {
+          fit.fit();
+        } catch {}
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+        }
+      }
+
+      function connect() {
+        const proto = location.protocol === "https:" ? "wss:" : "ws:";
+        ws = new WebSocket(`${proto}//${location.host}/ws`);
+        setStatus("connecting...", "");
+
+        ws.onopen = () => {
+          attempt = 0;
+          setStatus("connected", "on");
+          sendResize();
+          term.focus();
+        };
+
+        ws.onmessage = (ev) => {
+          let msg;
+          try {
+            msg = JSON.parse(ev.data);
+          } catch {
+            return;
+          }
+          if (msg.type === "output") {
+            term.write(msg.data);
+          } else if (msg.type === "exit") {
+            term.write(
+              `\r\n\x1b[33m[process exited: code ${msg.exitCode}` +
+                (msg.signal ? `, signal ${msg.signal}` : "") +
+                `]\x1b[0m\r\n`,
+            );
+            setStatus("session ended", "off");
+            showBanner("Shell exited. Press reconnect to start a new one.");
+          }
+        };
+
+        ws.onclose = () => {
+          if (manual) return;
+          setStatus("disconnected", "off");
+          const delay = Math.min(1000 * 2 ** attempt, 15000);
+          attempt += 1;
+          showBanner(`Connection lost. Reconnecting in ${delay / 1000}s...`);
+          setTimeout(() => {
+            if (!manual) connect();
+          }, delay);
+        };
+
+        ws.onerror = () => setStatus("connection error", "off");
+      }
+
+      term.onData((data) => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "input", data }));
+        }
+      });
+
+      term.onResize(() => {
+        if (ws && ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify({ type: "resize", cols: term.cols, rows: term.rows }));
+        }
+      });
+
+      let t;
+      window.addEventListener("resize", () => {
+        clearTimeout(t);
+        t = setTimeout(sendResize, 100);
+      });
+
+      document.getElementById("reconnect").addEventListener("click", () => {
+        manual = true;
+        banner.classList.remove("show");
+        if (ws) ws.close();
+        ws = null;
+        manual = false;
+        attempt = 0;
+        connect();
+      });
+
+      // Keep focus on the terminal, but let the header buttons be clickable.
+      document.addEventListener("click", (e) => {
+        if (!e.target.closest("header")) term.focus();
+      });
+
+      connect();
+    </script>
+  </body>
+</html>

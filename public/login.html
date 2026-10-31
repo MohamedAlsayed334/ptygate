@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>sign in</title>
+    <style>
+      :root { color-scheme: dark; }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        min-height: 100vh;
+        display: grid;
+        place-items: center;
+        background: #0b0e13;
+        color: #c9d1d9;
+        font: 14px/1.5 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      form {
+        width: min(360px, calc(100vw - 32px));
+        padding: 28px;
+        background: #121722;
+        border: 1px solid #222937;
+        border-radius: 10px;
+      }
+      h1 { margin: 0 0 4px; font-size: 15px; font-weight: 600; }
+      p { margin: 0 0 20px; color: #6b7688; font-size: 12px; }
+      input {
+        width: 100%;
+        padding: 10px 12px;
+        font: inherit;
+        color: inherit;
+        background: #0b0e13;
+        border: 1px solid #222937;
+        border-radius: 6px;
+        outline: none;
+      }
+      input:focus { border-color: #3fb950; }
+      button {
+        width: 100%;
+        margin-top: 14px;
+        padding: 10px 12px;
+        font: inherit;
+        color: #0b0e13;
+        background: #3fb950;
+        border: 0;
+        border-radius: 6px;
+        cursor: pointer;
+        font-weight: 600;
+      }
+      button:hover { background: #4ac95c; }
+      .err {
+        margin: 0 0 14px;
+        padding: 8px 10px;
+        color: #f85149;
+        background: #2a0f12;
+        border: 1px solid #5c1f24;
+        border-radius: 6px;
+        font-size: 12px;
+      }
+    </style>
+  </head>
+  <body>
+    <form method="post" action="/login">
+      <h1>web terminal</h1>
+      <p>Enter the access token printed by the server.</p>
+      <div class="err" id="err" style="display: none">Wrong token. Try again.</div>
+      <input
+        type="password"
+        name="token"
+        placeholder="access token"
+        autocomplete="current-password"
+        autofocus
+        required
+      />
+      <button type="submit">unlock</button>
+    </form>
+    <script>
+      if (new URLSearchParams(location.search).has("error")) {
+        document.getElementById("err").style.display = "block";
+      }
+    </script>
+  </body>
+</html>
