@@ -210,6 +210,17 @@ setInterval(() => {
 
 /* ------------------------------------------------------------------- auth */
 
+// decodeURIComponent throws URIError on malformed escapes such as "%E0%A4%A".
+// Cookies come straight off the wire from anyone who can reach the port, so a
+// bad cookie must never be able to break the request that carries it.
+function safeDecodeComponent(value) {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
 function parseCookies(req) {
   /** @type {Record<string,string>} */
   const out = {};
@@ -218,7 +229,7 @@ function parseCookies(req) {
   for (const part of header.split(";")) {
     const i = part.indexOf("=");
     if (i === -1) continue;
-    out[part.slice(0, i).trim()] = decodeURIComponent(part.slice(i + 1).trim());
+    out[part.slice(0, i).trim()] = safeDecodeComponent(part.slice(i + 1).trim());
   }
   return out;
 }
@@ -351,7 +362,28 @@ const wss = new WebSocketServer({ noServer: true, maxPayload: MAX_INPUT_BYTES })
 let ptyCount = 0;
 const ptyCountBySession = new Map(); // sid -> number
 
+// This listener runs outside Express, so an exception thrown here is an
+// uncaughtException that terminates the entire process. Anything reachable from
+// the network must be wrapped: one malformed request must not kill the gateway.
 server.on("upgrade", (req, socket, head) => {
+  try {
+    handleWsUpgrade(req, socket, head);
+  } catch (err) {
+    log(`[ws] upgrade failed: ${err?.message || err}`);
+    rejectUpgrade(socket, 400, "Bad Request");
+  }
+});
+
+function rejectUpgrade(socket, code, text) {
+  try {
+    socket.write(`HTTP/1.1 ${code} ${text}\r\n\r\n`);
+  } catch {
+    /* socket already gone */
+  }
+  socket.destroy();
+}
+
+function handleWsUpgrade(req, socket, head) {
   let url;
   try {
     url = new URL(req.url, `http://${req.headers.host}`);
@@ -391,26 +423,40 @@ server.on("upgrade", (req, socket, head) => {
   wss.handleUpgrade(req, socket, head, (ws) => {
     wss.emit("connection", ws, req, sid);
   });
-});
+}
 
 wss.on("connection", (ws, req, sid) => {
   const ip = normalizeIp(req.socket.remoteAddress);
+
+  // A failed spawn (missing shell, no ptys left, resource limits) must not
+  // propagate out of this event handler — that would kill the server.
+  let term;
+  try {
+    term = pty.spawn(SHELL, ["-l"], {
+      name: "xterm-256color",
+      cols: 100,
+      rows: 30,
+      cwd: HOME_DIR,
+      env: {
+        ...process.env,
+        HOME: HOME_DIR,
+        TERM: "xterm-256color",
+        COLORTERM: "truecolor",
+        LANG: process.env.LANG || "C.UTF-8",
+      },
+    });
+  } catch (err) {
+    log(`[pty] spawn failed from ${ip}: ${err?.message || err}`);
+    try {
+      ws.close(1011, "failed to start shell");
+    } catch {
+      /* socket already gone */
+    }
+    return;
+  }
+
   ptyCount += 1;
   ptyCountBySession.set(sid, (ptyCountBySession.get(sid) || 0) + 1);
-
-  const term = pty.spawn(SHELL, ["-l"], {
-    name: "xterm-256color",
-    cols: 100,
-    rows: 30,
-    cwd: HOME_DIR,
-    env: {
-      ...process.env,
-      HOME: HOME_DIR,
-      TERM: "xterm-256color",
-      COLORTERM: "truecolor",
-      LANG: process.env.LANG || "C.UTF-8",
-    },
-  });
 
   log(`[pty] open pid=${term.pid} from ${ip}`);
 
@@ -655,6 +701,13 @@ server.listen(PORT, HOST, () => {
     log("  tip: run with --console to also get a shell in this terminal.");
     log("");
   }
+});
+
+// Last resort. Every network-facing throw is caught above, but if a bug slips
+// through, a wedged-but-running terminal beats a dead one: log it and keep
+// serving instead of exiting. Remove this if you prefer crash-and-restart.
+process.on("uncaughtException", (err) => {
+  log(`[fatal] uncaught exception: ${err?.stack || err}`);
 });
 
 for (const sig of ["SIGINT", "SIGTERM"]) {
