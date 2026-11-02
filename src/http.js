@@ -3,6 +3,7 @@ import express from "express";
 import { isIpAllowed, normalizeIp } from "./ip_policy.js";
 import { parseCookies, formatSessionCookie } from "./auth.js";
 import { logger } from "./logger.js";
+import { NAME, VERSION, PROTOCOL } from "./version.js";
 
 /**
  * Configure Express HTTP application.
@@ -41,10 +42,11 @@ export function createHttpApp(config, authManager, ptyManager, rootDir) {
   // GET /version - protocol v1 version & capabilities metadata
   app.get("/version", (req, res) => {
     res.json({
-      name: "ptygate",
+      name: NAME,
       impl: "node",
-      version: "0.1.0",
-      protocol: 1,
+      version: VERSION,
+      protocol: PROTOCOL,
+      // Contract v1 requires all three booleans; this implementation only speaks plain HTTP.
       transports: {
         http: true,
         tls: false,

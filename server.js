@@ -10,12 +10,13 @@ import { PtyManager } from "./src/pty.js";
 import { LocalConsole } from "./src/console.js";
 import { createHttpApp } from "./src/http.js";
 import { setupWebSocket } from "./src/ws.js";
+import { NAME, VERSION, PROTOCOL } from "./src/version.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
 // Handle CLI flags like --help or --version early
 if (process.argv.includes("--version") || process.argv.includes("-v")) {
-  process.stdout.write("ptygate 0.1.0 (protocol 1)\n");
+  process.stdout.write(`${NAME} ${VERSION} (protocol ${PROTOCOL})\n`);
   process.exit(0);
 }
 
