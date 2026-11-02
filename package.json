@@ -10,16 +10,21 @@
   },
   "scripts": {
     "start": "node server.js",
-    "lan": "LAN=1 node server.js",
-    "console": "node server.js --console",
-    "lan:console": "LAN=1 ALLOW_PRIVATE_ONLY=0 PORT=${SERVER_PORT:-8080} node server.js --console",
+    "start:lan": "node server.js --host 0.0.0.0",
+    "start:console": "node server.js --console",
+    "start:container": "node server.js --host 0.0.0.0 --ip-mode any --console",
     "dev": "node --watch server.js",
-    "dev:lan": "LAN=1 node --watch server.js",
+    "dev:lan": "node --watch server.js --host 0.0.0.0",
+    "help": "node server.js --help",
     "check": "for f in server.js src/*.js; do node --check \"$f\" || exit 1; done",
     "test": "sh scripts/test-contract.sh",
+    "test:list": "python3 contract/tests/run_all.py --list",
     "contract:sync": "sh scripts/sync-contract.sh",
     "contract:check": "sh scripts/sync-contract.sh --check",
-    "env:report": "sh scripts/env-report.sh"
+    "env:report": "sh scripts/env-report.sh",
+    "lan": "npm run start:lan",
+    "console": "npm run start:console",
+    "lan:console": "npm run start:container"
   },
   "dependencies": {
     "@xterm/addon-fit": "^0.11.0",
