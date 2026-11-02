@@ -16,8 +16,3 @@ __pycache__/
 # personal notes (helpful for me, not for the repo)
 /SUMMARY.md
 /CODE_EXPLAINED.md
-/NPM_PUBLISH.md
-
-# npm packaging output
-/dist/
-/*.tgz
