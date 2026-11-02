@@ -135,7 +135,7 @@
 
       function connect() {
         const proto = location.protocol === "https:" ? "wss:" : "ws:";
-        ws = new WebSocket(`${proto}//${location.host}/ws`);
+        ws = new WebSocket(`${proto}//${location.host}/ws`, "ptygate.v1");
         setStatus("connecting...", "");
 
         ws.onopen = () => {
