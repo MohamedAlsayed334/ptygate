@@ -1,3 +1,23 @@
+# deps & runtime output
 node_modules/
-.env
 *.log
+npm-debug.log*
+
+# secrets
+.env
+
+# tooling caches / editor state
+__pycache__/
+.pytest_cache/
+.vscode/
+.idea/
+.DS_Store
+
+# personal notes (helpful for me, not for the repo)
+/SUMMARY.md
+/CODE_EXPLAINED.md
+/NPM_PUBLISH.md
+
+# npm packaging output
+/dist/
+/*.tgz
