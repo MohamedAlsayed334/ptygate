@@ -101,7 +101,6 @@ server.listen(config.port, config.host, () => {
     logger.log('    docker run -p 8080:8080 ...        or compose:  ports: ["8080:8080"]');
     logger.log("    then use the HOST machine's LAN IP (e.g. http://192.168.1.50:8080)");
     logger.log("    or: docker run --network host ...   (container shares the host's network)");
-    logger.log("    or: ssh -L 8080:127.0.0.1:8080 user@host");
   }
 
   if (!config.currentUser) {
