@@ -9,7 +9,13 @@
     "lan": "LAN=1 node server.js",
     "console": "node server.js --console",
     "lan:console": "LAN=1 ALLOW_PRIVATE_ONLY=0 PORT=${SERVER_PORT:-8080} node server.js --console",
-    "dev": "node --watch server.js"
+    "dev": "node --watch server.js",
+    "dev:lan": "LAN=1 node --watch server.js",
+    "check": "for f in server.js src/*.js; do node --check \"$f\" || exit 1; done",
+    "test": "sh scripts/test-contract.sh",
+    "contract:sync": "sh scripts/sync-contract.sh",
+    "contract:check": "sh scripts/sync-contract.sh --check",
+    "env:report": "sh scripts/env-report.sh"
   },
   "engines": {
     "node": ">=20"
