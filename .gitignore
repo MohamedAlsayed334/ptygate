@@ -1,3 +1,6 @@
 node_modules/
 .env
 *.log
+CODE_EXPLAINED.md
+__pycache__/
+</import>
