@@ -673,17 +673,45 @@ function hostUrls(port) {
   return out;
 }
 
+async function getPublicIp() {
+  if (process.env.PUBLIC_IP) return process.env.PUBLIC_IP.trim();
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 1500);
+  try {
+    const res = await Promise.any([
+      fetch("https://api.ipify.org", { signal: controller.signal }).then((r) => r.text()),
+      fetch("https://icanhazip.com", { signal: controller.signal }).then((r) => r.text()),
+      fetch("https://ifconfig.me/ip", { signal: controller.signal }).then((r) => r.text()),
+    ]);
+    const ip = res.trim();
+    if (/^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$/.test(ip)) {
+      return ip;
+    }
+  } catch {
+    /* lookup failed or offline */
+  } finally {
+    clearTimeout(timer);
+  }
+  return null;
+}
+
 const urls = hostUrls(PORT);
 
-server.listen(PORT, HOST, () => {
+server.listen(PORT, HOST, async () => {
   const wildcard = HOST === "0.0.0.0" || HOST === "::";
+  const publicUrlEnv = process.env.PUBLIC_URL;
+  let publicIp = process.env.PUBLIC_IP || null;
+
+  if (!publicIp && !publicUrlEnv && (wildcard || !ALLOW_PRIVATE_ONLY)) {
+    publicIp = await getPublicIp();
+  }
 
   log("");
   log("==================================================================");
   log(`  Web Terminal listening on http://${HOST}:${PORT}`);
   log("==================================================================");
   log("");
-  log("  Direct Web Terminal Link (with auto-login token):");
+  log("  Local Access Link (with auto-login token):");
   log(`    http://localhost:${PORT}/?token=${TOKEN}`);
 
   if (wildcard) {
@@ -706,6 +734,24 @@ server.listen(PORT, HOST, () => {
     }
   }
 
+  if (publicUrlEnv) {
+    log("");
+    log("  Public Internet Link (Remote Access):");
+    log(`    ${publicUrlEnv.replace(/\/$/, "")}/?token=${TOKEN}`);
+  } else if (publicIp) {
+    log("");
+    log("  Public Internet Link (Remote Access):");
+    log(`    http://${publicIp}:${PORT}/?token=${TOKEN}`);
+    if (ALLOW_PRIVATE_ONLY) {
+      log("    [!] Warning: ALLOW_PRIVATE_ONLY=1 is set. External connections will be blocked.");
+      log("        Run with ALLOW_PRIVATE_ONLY=0 to accept connections via this link.");
+    }
+  } else if (!ALLOW_PRIVATE_ONLY) {
+    log("");
+    log("  Public Internet Link (Remote Access):");
+    log(`    http://<your-public-ip>:${PORT}/?token=${TOKEN}`);
+  }
+
   log("");
   log(`  Access Token: ${TOKEN}${TOKEN_ENV ? "" : " (generated for this run)"}`);
   log(`  Shell:        ${SHELL}`);
@@ -715,17 +761,17 @@ server.listen(PORT, HOST, () => {
     log(
       ALLOW_PRIVATE_ONLY
         ? "  [Network Guard] LAN mode active: only private network IPs can connect."
-        : "  [Network Guard] WARNING: ALLOW_PRIVATE_ONLY=0 -- public connections are allowed.",
+        : "  [Network Guard] ALLOW_PRIVATE_ONLY=0: Public internet connections ARE ALLOWED.",
     );
   }
 
-  log("");
-  log("  [Remote / Outside Access]:");
-  log("    The LAN IP addresses above are private and NOT directly reachable from");
-  log("    outside your local network (the internet).");
-  log("    To connect securely from outside your network:");
-  log("      * Tunnel (easiest): run `cloudflared tunnel --url http://localhost:" + PORT + "` or use Tailscale");
-  log("      * Public server / VPS: start with `LAN=1 ALLOW_PRIVATE_ONLY=0 npm start`");
+  if (!ALLOW_PRIVATE_ONLY) {
+    log("");
+    log("  [Remote Access Setup]:");
+    log("    - Cloud VPS / Dedicated Server: The public link works directly!");
+    log(`    - Home Wi-Fi Router: Forward port ${PORT} to this machine's local IP in your router.`);
+    log(`      (Or use a tunnel without router config: \`cloudflared tunnel --url http://localhost:${PORT}\`)`);
+  }
   log("==================================================================");
 
   if (IN_CONTAINER) {
