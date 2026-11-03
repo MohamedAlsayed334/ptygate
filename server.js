@@ -300,7 +300,30 @@ app.use(express.urlencoded({ extended: false, limit: "8kb" }));
 
 // Login page + auth endpoints -------------------------------------------
 
+function tryTokenAuth(req, res) {
+  const token = req.query?.token;
+  if (!token) return false;
+  const ip = normalizeIp(req.socket.remoteAddress) || "unknown";
+  if (isLockedOut(ip)) {
+    res.status(429).send("Too many attempts. Try again later.");
+    return true;
+  }
+  if (!tokenMatches(token)) {
+    recordFail(ip);
+    log(`[auth] failed login attempt via url token from ${ip}`);
+    res.redirect("/login?error=1");
+    return true;
+  }
+  loginFails.delete(ip);
+  const sid = createSession();
+  res.setHeader("Set-Cookie", sessionCookie(sid, SESSION_TTL_MS));
+  log(`[auth] login ok via url token from ${ip}`);
+  res.redirect("/");
+  return true;
+}
+
 app.get("/login", (req, res) => {
+  if (tryTokenAuth(req, res)) return;
   if (getSession(parseCookies(req).wt_session)) return res.redirect("/");
   res.sendFile(path.join(__dirname, "public", "login.html"));
 });
@@ -344,6 +367,7 @@ for (const [route, file] of Object.entries(ASSETS)) {
 // The terminal page itself requires a session ----------------------------
 
 function requireAuth(req, res, next) {
+  if (tryTokenAuth(req, res)) return;
   if (!getSession(parseCookies(req).wt_session)) return res.redirect("/login");
   next();
 }
@@ -642,7 +666,7 @@ function hostUrls(port) {
       // so they are useless as "open this on your phone" addresses.
       const containerNet =
         IN_CONTAINER || /^(docker|br-|veth|virbr|podman|cni)/.test(name);
-      out.push({ name, url: `http://${a.address}:${port}`, containerNet });
+      out.push({ name, address: a.address, url: `http://${a.address}:${port}`, containerNet });
     }
   }
   out.sort((a, b) => Number(a.containerNet) - Number(b.containerNet));
@@ -652,26 +676,57 @@ function hostUrls(port) {
 const urls = hostUrls(PORT);
 
 server.listen(PORT, HOST, () => {
-  log("");
-  log(`  web terminal listening on http://${HOST}:${PORT}`);
   const wildcard = HOST === "0.0.0.0" || HOST === "::";
-  if (urls.length && wildcard) {
-    log("  addresses on this machine:");
-    for (const u of urls) {
-      log(
-        `    ${u.url}${u.containerNet ? `   (${u.name}: container network, not your LAN)` : `   (${u.name})`}`,
-      );
+
+  log("");
+  log("==================================================================");
+  log(`  Web Terminal listening on http://${HOST}:${PORT}`);
+  log("==================================================================");
+  log("");
+  log("  Direct Web Terminal Link (with auto-login token):");
+  log(`    http://localhost:${PORT}/?token=${TOKEN}`);
+
+  if (wildcard) {
+    const lanUrls = urls.filter((u) => !u.containerNet);
+    if (lanUrls.length > 0) {
+      log("");
+      log("  Local Network (LAN / same Wi-Fi) Links:");
+      for (const u of lanUrls) {
+        log(`    http://${u.address}:${PORT}/?token=${TOKEN}   (${u.name})`);
+      }
+    }
+
+    const containerUrls = urls.filter((u) => u.containerNet);
+    if (containerUrls.length > 0) {
+      log("");
+      log("  Container Network Addresses (only reachable inside container host):");
+      for (const u of containerUrls) {
+        log(`    http://${u.address}:${PORT}/?token=${TOKEN}   (${u.name})`);
+      }
     }
   }
+
+  log("");
+  log(`  Access Token: ${TOKEN}${TOKEN_ENV ? "" : " (generated for this run)"}`);
+  log(`  Shell:        ${SHELL}`);
+
   if (HOST !== "127.0.0.1" && HOST !== "localhost" && HOST !== "::1") {
+    log("");
     log(
       ALLOW_PRIVATE_ONLY
-        ? "  LAN mode: only private-network addresses may connect (ALLOW_PRIVATE_ONLY=1)."
-        : "  WARNING: ALLOW_PRIVATE_ONLY=0 -- anyone who can route to this port may connect.",
+        ? "  [Network Guard] LAN mode active: only private network IPs can connect."
+        : "  [Network Guard] WARNING: ALLOW_PRIVATE_ONLY=0 -- public connections are allowed.",
     );
   }
-  log(`  access token: ${TOKEN}${TOKEN_ENV ? "" : "   (generated for this run)"}`);
-  log(`  shell: ${SHELL}`);
+
+  log("");
+  log("  [Remote / Outside Access]:");
+  log("    The LAN IP addresses above are private and NOT directly reachable from");
+  log("    outside your local network (the internet).");
+  log("    To connect securely from outside your network:");
+  log("      * Tunnel (easiest): run `cloudflared tunnel --url http://localhost:" + PORT + "` or use Tailscale");
+  log("      * Public server / VPS: start with `LAN=1 ALLOW_PRIVATE_ONLY=0 npm start`");
+  log("==================================================================");
 
   if (IN_CONTAINER) {
     log("");
