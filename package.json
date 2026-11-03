@@ -6,9 +6,9 @@
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
-    "lan": "LAN=1 node server.js",
+    "lan": "LAN=1 ALLOW_PRIVATE_ONLY=${ALLOW_PRIVATE_ONLY:-0} node server.js",
     "console": "node server.js --console",
-    "lan:console": "LAN=1 node server.js --console",
+    "lan:console": "LAN=1 ALLOW_PRIVATE_ONLY=${ALLOW_PRIVATE_ONLY:-0} node server.js --console",
     "dev": "node --watch server.js"
   },
   "engines": {
