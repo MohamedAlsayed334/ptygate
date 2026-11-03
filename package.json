@@ -8,7 +8,7 @@
     "start": "node server.js",
     "lan": "LAN=1 node server.js",
     "console": "node server.js --console",
-    "lan:console": "LAN=1 ALLOW_PRIVATE_ONLY=0 PORT=${SERVER_PORT:-8080} node server.js --console",
+    "lan:console": "LAN=1 node server.js --console",
     "dev": "node --watch server.js"
   },
   "engines": {
