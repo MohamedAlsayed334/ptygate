@@ -27,9 +27,10 @@ enter the token. `/healthz` returns `ok` for a basic availability check. The
 host must support WebSocket connections and route the configured port.
 
 The terminal includes Copy and Paste controls, plus a live resource panel for
-CPU, memory, and disk usage. Browser clipboard permissions may be required for
-the toolbar buttons; terminal keyboard shortcuts remain available as a
-fallback.
+container CPU/memory and the filesystem used by the app. Container metrics may
+be unavailable if the host does not expose cgroup statistics; filesystem
+capacity is not a per-container storage quota. Clipboard access is controlled
+by the browser: HTTPS and permission are generally required for toolbar paste.
 
 ## npm scripts
 

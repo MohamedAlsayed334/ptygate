@@ -1,5 +1,4 @@
 import path from "node:path";
-import os from "node:os";
 import fs from "node:fs/promises";
 import { parseCookies, formatSessionCookie } from "../auth.js";
 
@@ -26,8 +25,8 @@ export function createTerminalModule() {
           readMetric("/sys/fs/cgroup/cpu.max"),
           fs.statfs(config.homeDir).catch(() => null),
         ]);
-        const memoryTotal = memoryMax && memoryMax !== "max" ? Number(memoryMax) : os.totalmem();
-        const memoryUsed = memoryCurrent !== null ? Number(memoryCurrent) : memoryTotal - os.freemem();
+        const memoryTotal = memoryMax && memoryMax !== "max" ? Number(memoryMax) : null;
+        const memoryUsed = memoryCurrent !== null ? Number(memoryCurrent) : null;
         let cpuPercent = 0;
         const usageLine = cpuStat?.split("\n").find((line) => line.startsWith("usage_usec "));
         const usage = usageLine ? Number(usageLine.split(/\s+/)[1]) : null;
@@ -45,9 +44,9 @@ export function createTerminalModule() {
         const diskTotal = disk ? Number(disk.blocks) * Number(disk.bsize) : null;
         const diskFree = disk ? Number(disk.bavail) * Number(disk.bsize) : null;
         return {
-          cpuPercent,
-          memory: { used: memoryUsed, total: memoryTotal },
-          disk: diskTotal === null ? null : { used: diskTotal - diskFree, total: diskTotal },
+          cpuPercent: usage === null ? null : cpuPercent,
+          memory: memoryUsed === null || memoryTotal === null ? null : { used: memoryUsed, total: memoryTotal },
+          filesystem: diskTotal === null ? null : { used: diskTotal - diskFree, total: diskTotal },
         };
       };
       http.route("GET", "/login", (req, res) => {

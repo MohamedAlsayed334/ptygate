@@ -96,7 +96,7 @@
     <section class="metrics" aria-label="Container resource usage">
       <div class="metric"><span class="metric-label">CPU</span><span class="metric-value" id="cpu-value">--</span><div class="metric-track"><div class="metric-fill" id="cpu-fill"></div></div></div>
       <div class="metric"><span class="metric-label">Memory</span><span class="metric-value" id="memory-value">--</span><div class="metric-track"><div class="metric-fill" id="memory-fill"></div></div></div>
-      <div class="metric"><span class="metric-label">Storage</span><span class="metric-value" id="storage-value">--</span><div class="metric-track"><div class="metric-fill" id="storage-fill"></div></div></div>
+      <div class="metric"><span class="metric-label">App filesystem</span><span class="metric-value" id="storage-value">--</span><div class="metric-track"><div class="metric-fill" id="storage-fill"></div></div></div>
       <span id="metrics-status" role="status">loading usage…</span>
     </section>
     <main class="shell-card"><div id="wrap"></div></main>
@@ -120,12 +120,12 @@
           const response = await fetch("/api/terminal/metrics", { cache: "no-store" });
           if (!response.ok) throw new Error("metrics unavailable");
           const data = await response.json();
-          const memoryPercent = data.memory.total ? (data.memory.used / data.memory.total) * 100 : 0;
-          const diskPercent = data.disk?.total ? (data.disk.used / data.disk.total) * 100 : null;
-          document.getElementById("cpu-value").textContent = `${data.cpuPercent.toFixed(1)}%`;
-          document.getElementById("memory-value").textContent = `${formatBytes(data.memory.used)} / ${formatBytes(data.memory.total)}`;
-          document.getElementById("storage-value").textContent = data.disk ? `${formatBytes(data.disk.used)} / ${formatBytes(data.disk.total)}` : "unavailable";
-          document.getElementById("cpu-fill").style.width = `${Math.min(100, data.cpuPercent)}%`;
+          const memoryPercent = data.memory?.total ? (data.memory.used / data.memory.total) * 100 : null;
+          const diskPercent = data.filesystem?.total ? (data.filesystem.used / data.filesystem.total) * 100 : null;
+          document.getElementById("cpu-value").textContent = data.cpuPercent === null ? "unavailable" : `${data.cpuPercent.toFixed(1)}%`;
+          document.getElementById("memory-value").textContent = data.memory ? `${formatBytes(data.memory.used)} / ${formatBytes(data.memory.total)}` : "unavailable";
+          document.getElementById("storage-value").textContent = data.filesystem ? `${formatBytes(data.filesystem.used)} / ${formatBytes(data.filesystem.total)}` : "unavailable";
+          document.getElementById("cpu-fill").style.width = `${Math.min(100, data.cpuPercent || 0)}%`;
           document.getElementById("memory-fill").style.width = `${Math.min(100, memoryPercent)}%`;
           document.getElementById("storage-fill").style.width = `${Math.min(100, diskPercent || 0)}%`;
           document.getElementById("metrics-status").textContent = "live · 3s";
@@ -173,17 +173,32 @@
 
       async function copySelection() {
         const selected = term.getSelection();
-        if (!selected) { showBanner("Select terminal text first, then press Copy."); return; }
+        if (!selected) { showBanner("Select text in the terminal first, then choose Copy."); return; }
         try {
-          await navigator.clipboard.writeText(selected);
+          if (navigator.clipboard?.writeText && window.isSecureContext) {
+            await navigator.clipboard.writeText(selected);
+          } else {
+            const area = document.createElement("textarea");
+            area.value = selected;
+            area.setAttribute("readonly", "");
+            area.style.cssText = "position:fixed;left:-9999px;top:0";
+            document.body.append(area);
+            area.select();
+            const copied = document.execCommand("copy");
+            area.remove();
+            if (!copied) throw new Error("copy unavailable");
+          }
           banner.classList.remove("show");
         } catch {
-          showBanner("Clipboard access was blocked. Select the text and use your browser’s Copy command.");
+          showBanner("Copy was blocked by the browser. Try HTTPS, or select the text and use your browser’s Copy command.");
         }
       }
 
       async function pasteClipboard() {
         try {
+          if (!navigator.clipboard?.readText || !window.isSecureContext) {
+            throw new Error("Paste requires a secure page and browser clipboard permission");
+          }
           const text = await navigator.clipboard.readText();
           if (text && ws && ws.readyState === WebSocket.OPEN) {
             ws.send(JSON.stringify({ type: "input", data: text }));
@@ -191,14 +206,15 @@
           } else if (!text) showBanner("Clipboard is empty.");
           else showBanner("Reconnect before pasting into the terminal.");
         } catch {
-          showBanner("Clipboard access was blocked. Use Ctrl/Cmd+Shift+V in the terminal or grant browser clipboard permission.");
+          showBanner("Paste needs HTTPS and clipboard permission. You can also paste with Ctrl/Cmd+V while the terminal is focused.");
         }
       }
 
       document.getElementById("copy").addEventListener("click", copySelection);
       document.getElementById("paste").addEventListener("click", pasteClipboard);
       document.addEventListener("keydown", (event) => {
-        if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "c") { event.preventDefault(); copySelection(); }
+        if (event.target.closest("button, input, textarea")) return;
+        if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "c" && term.hasSelection()) { event.preventDefault(); copySelection(); }
         if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "v") { event.preventDefault(); pasteClipboard(); }
       });
       refreshMetrics();

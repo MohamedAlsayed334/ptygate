@@ -45,6 +45,8 @@ export async function createModuleHost(config, services, rootDir, modules = [cre
         sessionTtlMs: config.sessionTtlMs,
         secureCookie: config.secureCookie,
         homeDir: config.homeDir,
+        homeDir: config.homeDir,
+        homeDir: config.homeDir,
       }),
       services: Object.freeze({ ...moduleServices }),
       rootDir,
