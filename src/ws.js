@@ -28,6 +28,8 @@ function rejectUpgrade(socket, code, text, headers = {}) {
  * @param {import("./pty.js").PtyManager} ptyManager
  */
 export function setupWebSocket(server, config, authManager, ptyManager) {
+  const handlers = new Map();
+  const activeRoutes = new Set();
   const wss = new WebSocketServer({
     noServer: true,
     maxPayload: config.maxInputBytes,
@@ -35,7 +37,12 @@ export function setupWebSocket(server, config, authManager, ptyManager) {
 
   server.on("upgrade", (req, socket, head) => {
     try {
-      handleUpgrade(req, socket, head);
+      const route = new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname;
+      const registered = handlers.get(route);
+      if (!registered) return rejectUpgrade(socket, 404, "Not Found");
+      if (!activeRoutes.has(route)) return rejectUpgrade(socket, 503, "Service Unavailable");
+      if (!isIpAllowed(req.socket.remoteAddress, config)) return rejectUpgrade(socket, 403, "Forbidden");
+      registered.handler(req, socket, head);
     } catch (err) {
       logger.log(`[ws] upgrade exception: ${err?.message || err}`);
       rejectUpgrade(socket, 400, "Bad Request");
@@ -56,9 +63,7 @@ export function setupWebSocket(server, config, authManager, ptyManager) {
       return rejectUpgrade(socket, 400, "Bad Request: Malformed URL");
     }
 
-    if (url.pathname !== "/ws") {
-      return rejectUpgrade(socket, 404, "Not Found");
-    }
+    if (url.pathname !== "/ws") return rejectUpgrade(socket, 404, "Not Found");
 
     const upgradeHeader = req.headers.upgrade;
     const connectionHeader = req.headers.connection;
@@ -77,10 +82,6 @@ export function setupWebSocket(server, config, authManager, ptyManager) {
     }
 
     // 2. IP Policy check -> 403
-    if (!isIpAllowed(req.socket.remoteAddress, config)) {
-      return rejectUpgrade(socket, 403, "Forbidden");
-    }
-
     // 3. Origin check (CSWSH prevention) -> 403
     const origin = req.headers.origin;
     if (origin) {
@@ -249,6 +250,14 @@ export function setupWebSocket(server, config, authManager, ptyManager) {
 
   return {
     wss,
+    register(route, handler, owner = "unknown") {
+      if (handlers.has(route)) throw new Error(`Duplicate WebSocket route ${route}: ${handlers.get(route).owner} and ${owner}`);
+      handlers.set(route, { handler, owner });
+    },
+    activate(route) {
+      if (handlers.has(route)) activeRoutes.add(route);
+    },
+    terminalHandler(req, socket, head) { handleUpgrade(req, socket, head); },
     close: () => {
       clearInterval(heartbeatTimer);
       for (const client of wss.clients) {

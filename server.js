@@ -7,8 +7,9 @@ import { logger } from "./src/logger.js";
 import { AuthManager } from "./src/auth.js";
 import { PtyManager } from "./src/pty.js";
 import { LocalConsole } from "./src/console.js";
-import { createHttpApp } from "./src/http.js";
 import { setupWebSocket } from "./src/ws.js";
+import { createModuleHost } from "./src/modules.js";
+import { normalizeIp } from "./src/ip_policy.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -41,9 +42,26 @@ const authManager = new AuthManager(config);
 const ptyManager = new PtyManager(config);
 const localConsole = new LocalConsole(config);
 
-const app = createHttpApp(config, authManager, ptyManager, __dirname);
-const server = http.createServer(app);
+const server = http.createServer();
 const wsHandler = setupWebSocket(server, config, authManager, ptyManager);
+const services = {
+  registerWebSocket: (route, handler, owner) => wsHandler.register(route, handler, owner),
+  activateWebSocket: (route) => wsHandler.activate(route),
+  forModule(id) {
+    if (id === "terminal") {
+      return {
+        authManager,
+        ptyManager,
+        normalizeIp,
+        terminalWebSocket: (req, socket, head) => wsHandler.terminalHandler(req, socket, head),
+      };
+    }
+    return {};
+  },
+};
+const host = await createModuleHost(config, services, __dirname);
+const app = host.app;
+server.on("request", app);
 
 server.listen(config.port, config.host, () => {
   logger.log(`Web terminal listening on ${config.host}:${config.port}`);
@@ -69,11 +87,12 @@ process.on("uncaughtException", (err) => {
 
 // Graceful termination
 for (const sig of ["SIGINT", "SIGTERM"]) {
-  process.on(sig, () => {
+  process.on(sig, async () => {
     logger.flushLogBuffer();
     process.stderr.write("\nshutting down\n");
     localConsole.stop();
     wsHandler.close();
+    await host.close().catch((err) => logger.log(`[shutdown] module cleanup failed: ${err?.message || err}`));
     ptyManager.destroyAll();
     authManager.close();
     server.close(() => process.exit(0));
