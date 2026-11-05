@@ -62,6 +62,9 @@ const services = {
 const host = await createModuleHost(config, services, __dirname);
 const app = host.app;
 server.on("request", app);
+server.on("upgrade", (req, socket, head) => {
+  if (host.handleUpgrade(req, socket, head)) return;
+});
 
 server.listen(config.port, config.host, () => {
   logger.log(`Web terminal listening on ${config.host}:${config.port}`);

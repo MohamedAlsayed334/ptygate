@@ -39,7 +39,7 @@ export function setupWebSocket(server, config, authManager, ptyManager) {
     try {
       const route = new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname;
       const registered = handlers.get(route);
-      if (!registered) return rejectUpgrade(socket, 404, "Not Found");
+      if (!registered) return;
       if (!activeRoutes.has(route)) return rejectUpgrade(socket, 503, "Service Unavailable");
       if (!isIpAllowed(req.socket.remoteAddress, config)) return rejectUpgrade(socket, 403, "Forbidden");
       registered.handler(req, socket, head);
