@@ -32,28 +32,15 @@ Consequences that change how you work:
 
 ## 2. Detect, never assume
 
-The first action on any new container instance:
-
-```sh
-sh scripts/env-report.sh        # aliases: npm run env:report
-```
-
-Read the `== verdict ==` block at the end of the report:
-- `VERDICT_WRITABLE_DIRS` — where files and caches may be written.
-- `VERDICT_NPM_GLOBAL_SAFE` — whether the default global npm directory is writable (usually NO).
-- `VERDICT_USE_PORT` — the allocated network port to bind.
-- `VERDICT_HOW_TO_INSTALL` — actionable summary for this instance.
-
-Key environment checks:
-```sh
-sh scripts/env-report.sh | grep -E '^(UID|HOME_WRITABLE|NODE_|VERDICT_)'
-```
-
-Rules of detection:
-- **Never hard-code ports.** Always bind `$PORT` or `$SERVER_PORT` (`VERDICT_USE_PORT`).
-- **Never assume `$HOME` is set properly.** If `HOME` is empty or `/`, tools write to
-  root and fail with `EACCES`. Verify `HOME_WRITABLE=yes`.
-- **Re-verify after container restarts.** The panel may pull or reset container images.
+- **Never hard-code a listening port.** The server uses an explicit `--port`,
+  then `PORT`, `SERVER_PORT`, or `PTYGATE_PORT`; if none is set, `.env` may
+  provide `PORT`. Startup must fail clearly rather than choose a fallback port.
+- The app cannot discover the hosting panel's external port or reliable public
+  URL through an outbound public-IP lookup. Bind to `0.0.0.0` and let the
+  hosting platform route its allocated port.
+- **Never assume `$HOME` is set properly.** If `HOME` is empty or `/`, tools may
+  write to root and fail with `EACCES`. Check writability before installing.
+- Re-check environment and allocated port after container restarts.
 
 ---
 
@@ -64,7 +51,7 @@ Rules of detection:
 | **No `sudo`, `apt`, `apt-get`, `apk`, `dnf`.** | Missing binary or permissions error. You cannot install OS-level packages. |
 | **No writes outside `$HOME`** (except short-lived scratch files in `$HOME/tmp`). | Root-owned paths fail with `EACCES`. `/tmp` is a tiny tmpfs (~100 MB) prone to `ENOSPC`. |
 | **No `npm install -g` without custom user prefix.** | Default prefix is `/usr/local` (root-owned). Global npm installs fail with `EACCES`. |
-| **No assumptions about ports 80, 443, 3000, 8080.** | Only `$SERVER_PORT` is forwarded by the panel. |
+| **No assumptions about ports 80, 443, 3000, or 8080.** | The panel-provided port is the one externally routed port. |
 | **No detached background processes.** | Background processes (`&`, `nohup`) die on container restart. |
 | **No secrets committed to the repo.** | Tokens and credentials must come from environment variables. |
 | **No editing `/etc/passwd`.** | System files are read-only for unprivileged containers. |
@@ -134,35 +121,54 @@ Best practices:
 
 ---
 
-## 6. Project layout & documentation
+## 6. Project layout & architecture direction
 
 ```
-server.js                entry point (CLI parsing, wiring, startup banner)
-src/                     gateway implementation, one concern per module
-  config.js              config resolution (CLI flags > PTYGATE_* > legacy env > defaults)
-  auth.js                sessions, cookie formatting, token compare, login lockout
-  http.js                express routes (/login /logout /healthz /version /assets)
+server.js                entry point (configuration, app wiring, startup)
+src/                     server and terminal implementation
+  config.js              CLI/environment configuration
+  auth.js                sessions, cookie formatting, token comparison, login lockout
+  http.js                current HTTP routes (/login, /logout, /healthz, assets)
   ws.js                  WebSocket upgrade guard + message pipe + heartbeat
   pty.js                 PTY lifecycle, replay ring buffer, capacity limits
   ip_policy.js           IP normalization, CIDR matching, private-range allowlist
   console.js             --console local shell bridge
   logger.js              stderr logger with buffering while console owns the tty
 public/                  login page + xterm.js terminal UI
-contract/                protocol v1 spec + language-agnostic conformance suite
-scripts/                 env-report.sh, sync-contract.sh, test-contract.sh
 ```
 
-Available npm scripts (see README for details):
-`start`, `lan`, `console`, `lan:console`, `dev`, `dev:lan`, `check`, `test`,
-`contract:sync`, `contract:check`, `env:report`.
+Current npm scripts: `npm start` for the hosted server and `npm run dev` for
+local development. Do not assume removed contract or environment-report scripts
+exist.
+
+### Future app routing
+
+The current product is a browser terminal. The intended direction is to grow
+this into one server that mounts independently organized apps under named URL
+prefixes (for example, `/terminal/` and a future `/ai/`). Keep `npm start` and
+the single hosting-panel port as the stable entry point. New app routes should
+be composed as route modules, not mixed into a monolithic HTTP handler.
+
+This is architectural guidance, not a request to implement a router framework
+or move current routes yet. When the first additional app is selected, design
+its route registration, static assets, WebSocket/proxy needs, error handling,
+and resource lifecycle against that concrete app. The server is not currently
+a process supervisor: do not add process management implicitly. Apps may choose
+their own authentication policy; do not silently expose them under the
+terminal's login or assume shared sessions.
+
+Apps running in the same container can share the one externally routed port
+through this server, but are constrained by the hosting container's resources.
+A route module alone does not run an independent app process. If a future app
+needs a local service (including model inference), assess provider support,
+CPU/RAM/storage limits, and how that service is started before promising it can
+run here. A separate-host app would require a deliberate proxy/network design;
+it is not implied by this same-container plan.
 
 Documentation status:
 - `README.md` — public, committed, keep up to date.
-- `contract/PROTOCOL.md` — the wire protocol + conformance expectations; the
-  implementation must conform to it, never the other way round.
-- `SUMMARY.md`, `CODE_EXPLAINED.md`, `NPM_PUBLISH.md` — **personal notes, git-
-  ignored on purpose.** They exist locally for the maintainer; do not commit,
-  reference them publicly, or delete them. Re-generate content, not presence.
+- Keep this file aligned with the actual repository and deployment model;
+  remove obsolete instructions rather than preserving them as assumed workflows.
 
 ---
 
@@ -170,21 +176,21 @@ Documentation status:
 
 ### Start Command (Pterodactyl Panel)
 
-The panel start command must run in the foreground with `--console`:
+Run the production server in the foreground using the hosting panel's normal
+start command (`npm start`):
 
 ```sh
-cd "$HOME" && \
-  PORT="$SERVER_PORT" HOST=0.0.0.0 LAN=1 ALLOW_PRIVATE_ONLY=0 \
-  TERMINAL_TOKEN="$TERMINAL_TOKEN" \
-  node server.js --console
+cd "$HOME" && npm start
 ```
 
 Why each argument matters:
-- **`--console`:** Keeps the panel console attached to an interactive recovery shell while the HTTP/WebSocket server runs. If web connectivity fails, this shell remains accessible.
-- **`PORT=$SERVER_PORT`:** Binds to the single TCP allocation assigned to the container.
-- **`HOST=0.0.0.0` / `LAN=1`:** Binds all network interfaces so traffic forwarded through Docker reaches the process.
-- **`ALLOW_PRIVATE_ONLY=0`:** Panel routing frequently translates remote client connections into public-facing IPs. Setting this to `0` allows external browser access while enforcing strong token authentication.
-- **`TERMINAL_TOKEN`:** Minimum 16-character secret configured via the panel environment.
+- The app reads the panel-provided port (`PORT` or `SERVER_PORT`) and binds to
+  `0.0.0.0` by default. If the panel supplies neither port, set `PORT` in a
+  local `.env` copied from `.env.example`.
+- Set a private `TERMINAL_TOKEN` in the hosting panel. Public clients are
+  allowed by default, and login remains required.
+- `--console` is an optional local shell bridge, not the production start
+  requirement.
 
 ---
 
@@ -197,9 +203,9 @@ Why each argument matters:
 | Prompt says `I have no name!`, `whoami` fails | Numeric UID has no `/etc/passwd` record | Harmless cosmetic artifact of rootless containers. Do not attempt to fix `/etc/passwd`. |
 | `ENOSPC` during install or package extraction | `/tmp` is a tiny tmpfs that filled up | Export `TMPDIR="$HOME/tmp"` and clear temporary files. |
 | Process exits with code 137 (`Killed`) | Container exceeded memory limits (OOM) | Ensure bounded ring buffers and run Node with `--max-old-space-size=384`. |
-| App reachable on `127.0.0.1` but not from outside | Bound to loopback or wrong port | Bind `0.0.0.0` and use `PORT=$SERVER_PORT`. |
-| Connection dropped immediately with HTTP 403 | IP policy rejection | Set `ALLOW_PRIVATE_ONLY=0` or set `ALLOWED_IPS` to include your IP. |
-| Server restarts repeatedly | Foreground process exited or crashed | Run `npm run check` to inspect syntax and review startup logs. |
+| App reachable on `127.0.0.1` but not from outside | Bound to loopback or wrong port | Bind `0.0.0.0` and use the panel-provided `PORT` or `SERVER_PORT`. |
+| Connection dropped immediately with HTTP 403 | Explicit IP allowlist mode rejected the client | Review `ALLOW_PRIVATE_ONLY` and `ALLOWED_IPS`; public access is the default. |
+| Server restarts repeatedly | Foreground process exited or crashed | Review startup logs and run `node --check` on changed JavaScript files. |
 
 
 ## Git Commits
