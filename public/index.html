@@ -7,21 +7,22 @@
     <link rel="stylesheet" href="/assets/xterm.css" />
     <style>
       :root {
-        --bg: #0b0e13;
-        --bar: #121722;
-        --line: #222937;
-        --text: #c9d1d9;
-        --muted: #6b7688;
-        --ok: #3fb950;
-        --warn: #d29922;
-        --bad: #f85149;
+        --bg: #080c12;
+        --bar: #101722;
+        --panel: #0e151f;
+        --line: #243143;
+        --text: #e1e9f2;
+        --muted: #8391a4;
+        --ok: #49dba1;
+        --warn: #f4c76b;
+        --bad: #ff7285;
       }
       * { box-sizing: border-box; }
       html, body { height: 100%; margin: 0; }
       body {
         background: var(--bg);
         color: var(--text);
-        font: 13px/1.4 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+        font: 13px/1.45 Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
         display: flex;
         flex-direction: column;
         overflow: hidden;
@@ -29,9 +30,9 @@
       header {
         display: flex;
         align-items: center;
-        gap: 12px;
-        padding: 8px 12px;
-        background: var(--bar);
+        gap: 10px;
+        padding: 10px 16px;
+        background: linear-gradient(180deg, #131c28, var(--bar));
         border-bottom: 1px solid var(--line);
         flex: 0 0 auto;
       }
@@ -43,15 +44,29 @@
       button {
         font: inherit;
         color: var(--text);
-        background: #1b2231;
+        background: #182231;
         border: 1px solid var(--line);
         border-radius: 6px;
-        padding: 4px 10px;
+        padding: 7px 11px;
         cursor: pointer;
       }
-      button:hover { background: #232c3d; }
-      #wrap { flex: 1 1 auto; min-height: 0; padding: 6px 4px 0 10px; }
+      button:hover { background: #243246; border-color: #3a4b62; }
+      button:focus-visible { outline: 2px solid var(--ok); outline-offset: 2px; }
+      .brand { font-weight: 700; letter-spacing: .02em; }
+      .status-group { display: flex; align-items: center; gap: 9px; }
+      .toolbar { display:flex; align-items:center; gap:8px; }
+      .shell-card { flex: 1 1 auto; min-height: 0; margin: 12px 14px 14px; padding: 8px 8px 4px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 14px 42px #0005; }
+      #wrap { height: 100%; min-height: 0; }
+      .xterm { height: 100%; }
       .xterm .xterm-viewport { background: transparent !important; }
+      .metrics { display:flex; align-items:stretch; gap:8px; padding:8px 14px 0; }
+      .metric { min-width:110px; padding:7px 10px; border:1px solid var(--line); border-radius:8px; background:#0d141e; }
+      .metric-label { display:block; color:var(--muted); font-size:10px; text-transform:uppercase; letter-spacing:.08em; }
+      .metric-value { display:block; margin-top:2px; font-size:12px; font-weight:650; font-variant-numeric:tabular-nums; }
+      .metric-track { height:3px; margin-top:6px; overflow:hidden; background:#263141; border-radius:4px; }
+      .metric-fill { height:100%; width:0; background:var(--ok); transition:width .35s ease; }
+      #metrics-status { align-self:center; color:var(--muted); font-size:11px; }
+      @media (max-width: 640px) { header { padding:9px 10px; gap:7px; } .brand { display:none; } .metrics { padding:7px 9px 0; gap:5px; } .metric { flex:1; min-width:0; padding:6px 7px; } .shell-card { margin:9px 8px 8px; } button { padding:7px 8px; } }
       #banner {
         display: none;
         padding: 6px 12px;
@@ -64,17 +79,27 @@
   </head>
   <body>
     <header>
-      <span class="dot off" id="dot"></span>
-      <span id="status">connecting...</span>
+      <span class="brand">ptygate <span style="color:var(--muted);font-weight:400">/ terminal</span></span>
+      <span class="status-group"><span class="dot off" id="dot"></span><span id="status">connecting...</span></span>
       <span class="spacer"></span>
-      <button id="reconnect" type="button">reconnect</button>
-      <form method="post" action="/logout" style="margin:0">
-        <button type="submit">log out</button>
-      </form>
+      <div class="toolbar">
+        <button id="copy" type="button" title="Copy selected text (Ctrl/Cmd+Shift+C)">Copy</button>
+        <button id="paste" type="button" title="Paste from clipboard (Ctrl/Cmd+Shift+V)">Paste</button>
+        <button id="reconnect" type="button">Reconnect</button>
+        <form method="post" action="/logout" style="margin:0">
+          <button type="submit">Log out</button>
+        </form>
+      </div>
     </header>
 
     <div id="banner"></div>
-    <div id="wrap"></div>
+    <section class="metrics" aria-label="Container resource usage">
+      <div class="metric"><span class="metric-label">CPU</span><span class="metric-value" id="cpu-value">--</span><div class="metric-track"><div class="metric-fill" id="cpu-fill"></div></div></div>
+      <div class="metric"><span class="metric-label">Memory</span><span class="metric-value" id="memory-value">--</span><div class="metric-track"><div class="metric-fill" id="memory-fill"></div></div></div>
+      <div class="metric"><span class="metric-label">Storage</span><span class="metric-value" id="storage-value">--</span><div class="metric-track"><div class="metric-fill" id="storage-fill"></div></div></div>
+      <span id="metrics-status" role="status">loading usage…</span>
+    </section>
+    <main class="shell-card"><div id="wrap"></div></main>
 
     <script src="/assets/xterm.js"></script>
     <script src="/assets/addon-fit.js"></script>
@@ -82,6 +107,32 @@
       const dot = document.getElementById("dot");
       const statusEl = document.getElementById("status");
       const banner = document.getElementById("banner");
+      const formatBytes = (value) => {
+        if (!Number.isFinite(value)) return "unavailable";
+        const units = ["B", "KB", "MB", "GB", "TB"];
+        let size = value, unit = 0;
+        while (size >= 1024 && unit < units.length - 1) { size /= 1024; unit++; }
+        return `${size.toFixed(unit ? 1 : 0)} ${units[unit]}`;
+      };
+
+      async function refreshMetrics() {
+        try {
+          const response = await fetch("/api/terminal/metrics", { cache: "no-store" });
+          if (!response.ok) throw new Error("metrics unavailable");
+          const data = await response.json();
+          const memoryPercent = data.memory.total ? (data.memory.used / data.memory.total) * 100 : 0;
+          const diskPercent = data.disk?.total ? (data.disk.used / data.disk.total) * 100 : null;
+          document.getElementById("cpu-value").textContent = `${data.cpuPercent.toFixed(1)}%`;
+          document.getElementById("memory-value").textContent = `${formatBytes(data.memory.used)} / ${formatBytes(data.memory.total)}`;
+          document.getElementById("storage-value").textContent = data.disk ? `${formatBytes(data.disk.used)} / ${formatBytes(data.disk.total)}` : "unavailable";
+          document.getElementById("cpu-fill").style.width = `${Math.min(100, data.cpuPercent)}%`;
+          document.getElementById("memory-fill").style.width = `${Math.min(100, memoryPercent)}%`;
+          document.getElementById("storage-fill").style.width = `${Math.min(100, diskPercent || 0)}%`;
+          document.getElementById("metrics-status").textContent = "live · 3s";
+        } catch {
+          document.getElementById("metrics-status").textContent = "usage unavailable";
+        }
+      }
 
       function setStatus(text, state) {
         statusEl.textContent = text;
@@ -99,14 +150,14 @@
         fontFamily: 'ui-monospace, SFMono-Regular, Menlo, Consolas, monospace',
         scrollback: 5000,
         theme: {
-          background: "#0b0e13",
-          foreground: "#c9d1d9",
-          cursor: "#3fb950",
-          selectionBackground: "#2d3a4f",
-          black: "#0b0e13",
-          red: "#f85149",
-          green: "#3fb950",
-          yellow: "#d29922",
+          background: "#0e151f",
+          foreground: "#e1e9f2",
+          cursor: "#49dba1",
+          selectionBackground: "#33506a",
+          black: "#080c12",
+          red: "#ff7285",
+          green: "#49dba1",
+          yellow: "#f4c76b",
           blue: "#58a6ff",
           magenta: "#bc8cff",
           cyan: "#39c5cf",
@@ -119,6 +170,40 @@
       term.open(document.getElementById("wrap"));
       fit.fit();
       term.focus();
+
+      async function copySelection() {
+        const selected = term.getSelection();
+        if (!selected) { showBanner("Select terminal text first, then press Copy."); return; }
+        try {
+          await navigator.clipboard.writeText(selected);
+          banner.classList.remove("show");
+        } catch {
+          showBanner("Clipboard access was blocked. Select the text and use your browser’s Copy command.");
+        }
+      }
+
+      async function pasteClipboard() {
+        try {
+          const text = await navigator.clipboard.readText();
+          if (text && ws && ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: "input", data: text }));
+            term.focus();
+          } else if (!text) showBanner("Clipboard is empty.");
+          else showBanner("Reconnect before pasting into the terminal.");
+        } catch {
+          showBanner("Clipboard access was blocked. Use Ctrl/Cmd+Shift+V in the terminal or grant browser clipboard permission.");
+        }
+      }
+
+      document.getElementById("copy").addEventListener("click", copySelection);
+      document.getElementById("paste").addEventListener("click", pasteClipboard);
+      document.addEventListener("keydown", (event) => {
+        if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "c") { event.preventDefault(); copySelection(); }
+        if ((event.ctrlKey || event.metaKey) && event.shiftKey && event.key.toLowerCase() === "v") { event.preventDefault(); pasteClipboard(); }
+      });
+      refreshMetrics();
+      const metricsTimer = setInterval(refreshMetrics, 3000);
+      window.addEventListener("beforeunload", () => clearInterval(metricsTimer));
 
       let ws = null;
       let attempt = 0;
