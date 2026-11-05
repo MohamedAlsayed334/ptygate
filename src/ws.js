@@ -97,7 +97,8 @@ export function setupWebSocket(server, config, authManager, ptyManager) {
       }
     }
 
-    // 4. Auth check -> 401
+    // 4. Auth check -> 401. The browser authenticates through /login and
+    // presents its session cookie on the WebSocket connection.
     const cookies = parseCookies(req);
     const sid = cookies.wt_session;
     if (!sid || !authManager.getSession(sid)) {

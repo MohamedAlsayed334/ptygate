@@ -4,24 +4,6 @@ import path from "node:path";
 import crypto from "node:crypto";
 
 /**
- * Detect if we are running inside a container (Docker, Podman, LXC, Pterodactyl, etc.).
- * @returns {string|null} Container runtime type or null if not in container.
- */
-export function detectContainer() {
-  try {
-    if (fs.existsSync("/.dockerenv")) return "docker";
-    if (fs.existsSync("/run/.containerenv")) return "podman";
-    if (fs.existsSync("/proc/1/cgroup")) {
-      const cgroup = fs.readFileSync("/proc/1/cgroup", "utf8");
-      if (/(docker|kubepods|containerd|lxc|pterodactyl)/.test(cgroup)) return "container";
-    }
-  } catch {
-    /* not a container or unreadable */
-  }
-  return null;
-}
-
-/**
  * Detect current user safely.
  * Returns null if numeric UID has no /etc/passwd entry.
  */
@@ -50,16 +32,27 @@ export function getHomeDir() {
   return home;
 }
 
+function loadDotEnv(env) {
+  const file = path.resolve(process.cwd(), ".env");
+  if (!fs.existsSync(file)) return;
+  for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
+    const match = line.match(/^\s*(?:export\s+)?([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)\s*$/);
+    if (!match || Object.hasOwn(env, match[1])) continue;
+    let value = match[2];
+    if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
+      value = value.slice(1, -1);
+    } else {
+      value = value.replace(/\s+#.*$/, "").trim();
+    }
+    env[match[1]] = value;
+  }
+}
+
 /**
- * Parse and resolve full configuration with precedence and defaults:
- * Precedence:
- * 1. CLI flags
- * 2. Canonical environment variables (PTYGATE_*)
- * 3. Legacy environment variables (PORT, SERVER_PORT, HOST, LAN, ALLOW_PRIVATE_ONLY, ALLOWED_IPS, TERMINAL_TOKEN, LOCAL_CONSOLE)
- * 4. Stored config or defaults
+ * Resolve hosting configuration from optional flags and environment values.
  */
 export function loadConfig(argv = process.argv, env = process.env) {
-  const inContainer = detectContainer();
+  loadDotEnv(env);
 
   // Parse command line arguments
   const flags = {};
@@ -69,8 +62,6 @@ export function loadConfig(argv = process.argv, env = process.env) {
       flags.console = true;
     } else if (arg === "--help" || arg === "-h") {
       flags.help = true;
-    } else if (arg === "--version" || arg === "-v") {
-      flags.version = true;
     } else if (arg === "--port" && i + 1 < argv.length) {
       flags.port = argv[++i];
     } else if (arg.startsWith("--port=")) {
@@ -98,54 +89,49 @@ export function loadConfig(argv = process.argv, env = process.env) {
     }
   }
 
-  // PORT resolution
-  // CLI --port > PTYGATE_PORT > PORT > SERVER_PORT > 8080
-  const rawPort = flags.port ?? env.PTYGATE_PORT ?? env.PORT ?? env.SERVER_PORT ?? "8080";
+  // Prefer a hosting-panel port; .env PORT is the local fallback.
+  const rawPort = flags.port ?? env.PORT ?? env.SERVER_PORT ?? env.PTYGATE_PORT;
+  if (!rawPort) {
+    throw new Error("No port configured. Set PORT in the hosting panel or copy .env.example to .env and set PORT.");
+  }
   const port = Number(rawPort);
   if (!Number.isInteger(port) || port <= 0 || port > 65535) {
     throw new Error(`Invalid port: "${rawPort}". Must be an integer between 1 and 65535.`);
   }
 
-  // HOST resolution
-  // CLI --host > PTYGATE_HOST > HOST > (LAN=1 => 0.0.0.0) > (inContainer => 0.0.0.0) > 127.0.0.1
-  const wantLan = env.LAN === "1" || env.LAN === "true";
-  let host = flags.host ?? env.PTYGATE_HOST ?? env.HOST;
-  if (!host) {
-    if (wantLan || inContainer) {
-      host = "0.0.0.0";
-    } else {
-      host = "127.0.0.1";
-    }
-  }
+  // Hosted containers must listen on all interfaces for the platform proxy.
+  // HOST/PTYGATE_HOST can still override this when intentionally needed.
+  let host = flags.host ?? env.HOST;
+  if (!host) host = "0.0.0.0";
 
   // CONSOLE resolution
   // CLI --console > LOCAL_CONSOLE === "1"
   const localConsole = Boolean(flags.console || env.LOCAL_CONSOLE === "1");
 
   // IP MODE & ALLOWED_IPS
-  // ALLOW_PRIVATE_ONLY="0" means "any", default is "allowlist"
-  // CLI --ip-mode > PTYGATE_IP_MODE > (ALLOW_PRIVATE_ONLY="0" ? "any" : "allowlist")
-  let ipMode = flags.ipMode ?? env.PTYGATE_IP_MODE;
+  // Public access is the default for hosted web terminals. The login token
+  // remains required; allowlist mode can be explicitly enabled if desired.
+  let ipMode = flags.ipMode;
   if (!ipMode) {
-    if (env.ALLOW_PRIVATE_ONLY === "0") {
-      ipMode = "any";
-    } else {
+    if (env.ALLOW_PRIVATE_ONLY === "1" || env.ALLOW_PRIVATE_ONLY === "true") {
       ipMode = "allowlist";
+    } else {
+      ipMode = "any";
     }
   }
   if (ipMode !== "allowlist" && ipMode !== "any") {
     throw new Error(`Invalid ip-mode: "${ipMode}". Must be "allowlist" or "any".`);
   }
 
-  const rawAllowedIps = flags.allowedIps ?? env.PTYGATE_ALLOWED_IPS ?? env.ALLOWED_IPS ?? "";
+  const rawAllowedIps = flags.allowedIps ?? env.ALLOWED_IPS ?? "";
   const allowedIps = rawAllowedIps
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
 
   // TOKEN resolution
-  // CLI --token > PTYGATE_TOKEN > TERMINAL_TOKEN > generated
-  const tokenEnv = flags.token ?? env.PTYGATE_TOKEN ?? env.TERMINAL_TOKEN;
+  // CLI --token > TERMINAL_TOKEN > generated
+  const tokenEnv = flags.token ?? env.TERMINAL_TOKEN;
   let token = tokenEnv;
   let isGeneratedToken = false;
   if (!token) {
@@ -162,13 +148,13 @@ export function loadConfig(argv = process.argv, env = process.env) {
   const secureCookie = env.COOKIE_SECURE === "1";
 
   // LOG LEVEL
-  const logLevel = flags.logLevel ?? env.PTYGATE_LOG_LEVEL ?? "info";
+  const logLevel = flags.logLevel ?? "info";
 
   // CAPACITY & LIMITS
   const sessionTtlMs = 12 * 60 * 60 * 1000; // 12h
   const resumeGraceMs = Number(env.RESUME_GRACE_MS) || 300_000; // 5 min default
-  const maxPtysTotal = 4; // protocol limit is 4 concurrent PTYs total
-  const maxPtysPerSession = 1; // 1 PTY per session at a time
+  const maxPtysTotal = 8;
+  const maxPtysPerSession = 4;
   const maxInputBytes = 64 * 1024; // 64 KiB
   const maxReplayBytes = 262_144; // 256 KiB ring buffer
 
@@ -196,6 +182,5 @@ export function loadConfig(argv = process.argv, env = process.env) {
     maxReplayBytes,
     homeDir,
     currentUser,
-    inContainer,
   };
 }

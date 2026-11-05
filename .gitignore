@@ -5,6 +5,7 @@ npm-debug.log*
 
 # secrets
 .env
+!.env.example
 
 # tooling caches / editor state
 __pycache__/

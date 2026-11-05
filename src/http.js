@@ -2,8 +2,6 @@ import path from "node:path";
 import express from "express";
 import { isIpAllowed, normalizeIp } from "./ip_policy.js";
 import { parseCookies, formatSessionCookie } from "./auth.js";
-import { logger } from "./logger.js";
-import { NAME, VERSION, PROTOCOL } from "./version.js";
 
 /**
  * Configure Express HTTP application.
@@ -21,13 +19,12 @@ export function createHttpApp(config, authManager, ptyManager, rootDir) {
     const ip = req.socket.remoteAddress;
     if (isIpAllowed(ip, config)) return next();
 
-    logger.log(`[deny] ${normalizeIp(ip)} is outside the allowed ranges`);
     res
       .status(403)
       .type("text/plain")
       .send(
-        "Forbidden: this terminal only accepts connections from your local network.\n" +
-          "Set ALLOW_PRIVATE_ONLY=0 or ALLOWED_IPS=<cidr,...> to change that.\n",
+        "Forbidden: this terminal only accepts connections from the configured IP allowlist.\n" +
+          "Disable ALLOW_PRIVATE_ONLY or configure ALLOWED_IPS to change that.\n",
       );
   });
 
@@ -37,23 +34,6 @@ export function createHttpApp(config, authManager, ptyManager, rootDir) {
   // GET /healthz - unauthenticated liveness check
   app.get("/healthz", (req, res) => {
     res.type("text/plain").send("ok");
-  });
-
-  // GET /version - protocol v1 version & capabilities metadata
-  app.get("/version", (req, res) => {
-    res.json({
-      name: NAME,
-      impl: "node",
-      version: VERSION,
-      protocol: PROTOCOL,
-      // Contract v1 requires all three booleans; this implementation only speaks plain HTTP.
-      transports: {
-        http: true,
-        tls: false,
-        ssh: false,
-      },
-      ip_mode: config.ipMode,
-    });
   });
 
   // GET /login - display login form
@@ -77,8 +57,6 @@ export function createHttpApp(config, authManager, ptyManager, rootDir) {
     const tokenInput = req.body?.token;
     if (tokenInput === undefined || tokenInput === null || typeof tokenInput !== "string" || !authManager.verifyToken(tokenInput)) {
       authManager.recordFail(ip);
-      logger.log(`[auth] failed login from ${ip}`);
-      // Return 401 Unauthorized per protocol specification
       return res.status(401).type("text/plain").send("Unauthorized: Invalid token.\n");
     }
 
@@ -86,8 +64,6 @@ export function createHttpApp(config, authManager, ptyManager, rootDir) {
     const sid = authManager.createSession();
     const cookie = formatSessionCookie(sid, config.sessionTtlMs, config.secureCookie);
     res.setHeader("Set-Cookie", cookie);
-    logger.log(`[auth] login ok from ${ip}`);
-    // 303 See Other per specification
     res.redirect(303, "/");
   });
 
