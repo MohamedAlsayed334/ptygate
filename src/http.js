@@ -1,4 +1,6 @@
 import path from "node:path";
+import os from "node:os";
+import fs from "node:fs/promises";
 import express from "express";
 import { isIpAllowed, normalizeIp } from "./ip_policy.js";
 import { parseCookies, formatSessionCookie } from "./auth.js";
@@ -12,6 +14,7 @@ import { parseCookies, formatSessionCookie } from "./auth.js";
  */
 export function createHttpApp(config, authManager, ptyManager, rootDir) {
   const app = express();
+  let previousCpu = null;
   app.disable("x-powered-by");
 
   // Global IP policy guard: runs before everything, including static assets and healthz
@@ -34,6 +37,42 @@ export function createHttpApp(config, authManager, ptyManager, rootDir) {
   // GET /healthz - unauthenticated liveness check
   app.get("/healthz", (req, res) => {
     res.type("text/plain").send("ok");
+  });
+
+  app.get("/api/terminal/metrics", async (req, res) => {
+    res.setHeader("Cache-Control", "no-store");
+    if (!authManager.getSession(parseCookies(req).wt_session)) {
+      return res.status(401).json({ error: "unauthorized" });
+    }
+    const readMetric = async (file) => {
+      try { return (await fs.readFile(file, "utf8")).trim(); } catch { return null; }
+    };
+    const [memoryCurrent, memoryMax, cpuStat, cpuMax, disk] = await Promise.all([
+      readMetric("/sys/fs/cgroup/memory.current"),
+      readMetric("/sys/fs/cgroup/memory.max"),
+      readMetric("/sys/fs/cgroup/cpu.stat"),
+      readMetric("/sys/fs/cgroup/cpu.max"),
+      fs.statfs(config.homeDir).catch(() => null),
+    ]);
+    const memoryTotal = memoryMax && memoryMax !== "max" ? Number(memoryMax) : os.totalmem();
+    const memoryUsed = memoryCurrent !== null ? Number(memoryCurrent) : memoryTotal - os.freemem();
+    const usageLine = cpuStat?.split("\n").find((line) => line.startsWith("usage_usec "));
+    const usage = usageLine ? Number(usageLine.split(/\s+/)[1]) : null;
+    const now = performance.now();
+    let cpuPercent = 0;
+    if (usage !== null && Number.isFinite(usage)) {
+      if (previousCpu && usage >= previousCpu.usage) {
+        const elapsedUsec = (now - previousCpu.time) * 1000;
+        let cores = 1;
+        const [quota, period] = cpuMax?.split(/\s+/).map(Number) ?? [];
+        if (quota > 0 && period > 0) cores = quota / period;
+        cpuPercent = Math.min(100, ((usage - previousCpu.usage) / elapsedUsec / cores) * 100);
+      }
+      previousCpu = { usage, time: now };
+    }
+    const diskTotal = disk ? Number(disk.blocks) * Number(disk.bsize) : null;
+    const diskFree = disk ? Number(disk.bavail) * Number(disk.bsize) : null;
+    res.json({ cpuPercent, memory: { used: memoryUsed, total: memoryTotal }, disk: diskTotal === null ? null : { used: diskTotal - diskFree, total: diskTotal } });
   });
 
   // GET /login - display login form

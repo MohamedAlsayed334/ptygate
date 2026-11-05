@@ -26,6 +26,11 @@ Open the server address and allocated port shown by the hosting panel, then
 enter the token. `/healthz` returns `ok` for a basic availability check. The
 host must support WebSocket connections and route the configured port.
 
+The terminal includes Copy and Paste controls, plus a live resource panel for
+CPU, memory, and disk usage. Browser clipboard permissions may be required for
+the toolbar buttons; terminal keyboard shortcuts remain available as a
+fallback.
+
 ## npm scripts
 
 - `npm start` — start the web terminal (normal hosting command).
