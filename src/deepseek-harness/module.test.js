@@ -3,20 +3,32 @@ import assert from "node:assert/strict";
 import { createServer, request } from "node:http";
 import { once } from "node:events";
 import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { createDeepSeekHarnessModule, waitReady } from "./module.js";
 
-test("DeepSeek Harness stays disabled unless explicitly enabled", async () => {
-  const previous = process.env.DEEPSEEK_HARNESS_ENABLED;
-  delete process.env.DEEPSEEK_HARNESS_ENABLED;
-  try { assert.equal(await createDeepSeekHarnessModule().setup({}), undefined); }
-  finally { if (previous === undefined) delete process.env.DEEPSEEK_HARNESS_ENABLED; else process.env.DEEPSEEK_HARNESS_ENABLED = previous; }
-});
-
-test("enabled Harness requires checkout and public trusted host configuration", async () => {
-  const previous = process.env.DEEPSEEK_HARNESS_ENABLED;
-  process.env.DEEPSEEK_HARNESS_ENABLED = "1";
-  try { await assert.rejects(createDeepSeekHarnessModule().setup({}), /DEEPSEEK_HARNESS_DIR/); }
-  finally { if (previous === undefined) delete process.env.DEEPSEEK_HARNESS_ENABLED; else process.env.DEEPSEEK_HARNESS_ENABLED = previous; }
+test("Harness setup prepares the default checkout without opt-in environment flags", async () => {
+  let prepared;
+  const child = new EventEmitter();
+  child.exitCode = null; child.signalCode = null;
+  const routes = new Map();
+  let upgrade;
+  const upstream = createServer((_req, res) => res.writeHead(204).end());
+  let upstreamListening;
+  try {
+    const cleanup = await createDeepSeekHarnessModule({ prepare: async (dir) => { prepared = dir; }, spawnProcess: (_cmd, args) => {
+      const port = Number(args[args.indexOf("--port") + 1]);
+      upstreamListening = new Promise((resolve) => upstream.listen(port, "127.0.0.1", resolve));
+      upstreamListening.then(() => { child.kill = (signal) => { child.exitCode = 0; child.signalCode = signal; upstream.close(() => child.emit("exit", null, signal)); }; });
+      return child;
+    } }).setup({ config: { homeDir: process.cwd(), secureCookie: false }, services: { authManager: { getSession: () => null }, parseCookies: () => ({}) }, http: { route: (_m, r, h) => routes.set(r, h) }, websocket: { onUpgrade: (h) => { upgrade = h; } }, health: { register() {} } });
+    await upstreamListening;
+    assert.equal(prepared, `${process.cwd()}/.ptygate/deepseek-harness`);
+    assert.ok(routes.has("/ai/*path"));
+    assert.equal(typeof upgrade, "function");
+    await cleanup();
+  } finally {
+    if (upstream.listening) upstream.close();
+  }
 });
 
 test("readiness ignores unsuccessful responses until successful status", async (t) => {
@@ -37,12 +49,13 @@ test("readiness rejects immediately when child emits spawn error", async () => {
   await assert.rejects(ready, /spawn failed/);
 });
 
-test("proxy strips prefix and rewrites redirects and cookie paths", async (t) => {
-  let upstreamRequests = 0;
+test("proxy strips prefix, rewrites redirects/cookies, and gates HTTP and WebSocket by session", async (t) => {
+  let proxyRequestSeen = false;
   const upstream = createServer((req, res) => {
-    if (++upstreamRequests === 1 && req.url === "/") return res.writeHead(204).end();
+    if (req.url === "/") return res.writeHead(204).end();
+    proxyRequestSeen = true;
     assert.equal(req.url, "/thing?q=1");
-    assert.equal(req.headers.host, "public.example");
+    assert.equal(req.headers.host, "127.0.0.1");
     res.writeHead(302, { location: "/next", "set-cookie": ["sid=x; Path=/; HttpOnly"] }).end("ok");
   });
   upstream.listen(0, "127.0.0.1");
@@ -50,17 +63,20 @@ test("proxy strips prefix and rewrites redirects and cookie paths", async (t) =>
   t.after(() => upstream.close());
   const child = new EventEmitter();
   child.exitCode = null; child.signalCode = null;
-  child.kill = (signal) => { child.signalCode = signal; child.emit("exit", null, signal); };
-  const previous = { ...process.env };
-  process.env.DEEPSEEK_HARNESS_ENABLED = "1";
-  process.env.DEEPSEEK_HARNESS_DIR = process.cwd();
-  process.env.DEEPSEEK_HARNESS_PUBLIC_HOST = "public.example";
-  process.env.DEEPSEEK_HARNESS_PORT = String(upstream.address().port);
-  process.env.DEEPSEEK_HARNESS_HTTPS = "0";
+  child.kill = (signal) => { child.exitCode = 0; child.signalCode = signal; child.emit("exit", null, signal); };
   const routes = new Map();
   let upgradeHandler;
+  let sessionValid = true;
   try {
-    const cleanup = await createDeepSeekHarnessModule({ spawnProcess: () => child }).setup({
+    const cleanup = await createDeepSeekHarnessModule({ prepare: async () => {}, selectPort: async () => upstream.address().port, spawnProcess: () => {
+      setTimeout(() => {
+        const readiness = request({ host: "127.0.0.1", port: upstream.address().port, path: "/" }, (response) => response.resume());
+        readiness.on("error", () => {}); readiness.end();
+      }, 0);
+      return child;
+    } }).setup({
+      config: { homeDir: process.cwd(), secureCookie: false },
+      services: { authManager: { getSession: () => sessionValid ? ({}) : null }, parseCookies: (req) => req.headers.cookie ? ({ wt_session: "sid" }) : ({}) },
       http: { route: (_method, route, handler) => routes.set(route, handler) },
       websocket: { onUpgrade: (handler) => { upgradeHandler = handler; } },
       health: { register() {} },
@@ -74,13 +90,23 @@ test("proxy strips prefix and rewrites redirects and cookie paths", async (t) =>
       }).on("error", reject).end());
     });
     assert.equal(result.statusCode, 302);
+    assert.equal(proxyRequestSeen, true);
     assert.equal(result.headers.location, "/ai/next");
     assert.match(result.headers["set-cookie"][0], /Path=\/ai\//);
     assert.equal(typeof upgradeHandler, "function");
+    sessionValid = false;
+    const unauthorizedProxyResponse = await new Promise((resolve, reject) => {
+      const proxyServer = createServer((req, res) => proxy(req, res));
+      proxyServer.listen(0, "127.0.0.1", () => request({ host: "127.0.0.1", port: proxyServer.address().port, path: "/ai/" }, (response) => {
+        response.resume(); response.on("end", () => { resolve(response); proxyServer.close(); });
+      }).on("error", reject).end());
+    });
+    assert.equal(unauthorizedProxyResponse.statusCode, 302);
+    assert.match(unauthorizedProxyResponse.headers.location, /^\/login\?returnTo=/);
+    const denied = new PassThrough();
+    const upgradeReq = { url: "/ai/api/remote.mux", headers: { host: "example.test" } };
+    assert.equal(upgradeHandler(upgradeReq, denied, Buffer.alloc(0)), true);
+    assert.match(denied.read().toString(), /401 Unauthorized/);
     await cleanup();
-  } finally {
-    for (const key of ["DEEPSEEK_HARNESS_ENABLED", "DEEPSEEK_HARNESS_DIR", "DEEPSEEK_HARNESS_PUBLIC_HOST", "DEEPSEEK_HARNESS_PORT", "DEEPSEEK_HARNESS_HTTPS"]) {
-      if (previous[key] === undefined) delete process.env[key]; else process.env[key] = previous[key];
-    }
-  }
+  } finally { await new Promise((resolve) => upstream.close(resolve)); }
 });

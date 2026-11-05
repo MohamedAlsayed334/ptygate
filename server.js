@@ -10,6 +10,7 @@ import { LocalConsole } from "./src/console.js";
 import { setupWebSocket } from "./src/ws.js";
 import { createModuleHost } from "./src/modules.js";
 import { normalizeIp } from "./src/ip_policy.js";
+import { parseCookies } from "./src/auth.js";
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 
@@ -55,6 +56,9 @@ const services = {
         normalizeIp,
         terminalWebSocket: (req, socket, head) => wsHandler.terminalHandler(req, socket, head),
       };
+    }
+    if (id === "deepseek-harness") {
+      return { authManager, parseCookies };
     }
     return {};
   },

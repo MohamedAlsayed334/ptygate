@@ -60,39 +60,20 @@ secret and use HTTPS when your hosting platform provides it. Shell commands run
 with the same permissions as the Node process; this app does not grant `sudo`
 or root privileges.
 
-## Optional DeepSeek Harness preview
+## DeepSeek Harness
 
-An opt-in module can supervise an independently checked-out DeepSeek Harness
-process and proxy it under `/ai/` on ptygate's existing listener. Harness is
-experimental software, separate from ptygate, and can execute model-generated
-commands and plugins and access files, credentials, and the network. This
-integration does not make it safe or sandboxed. Prefer a separate, isolated
-service/container with restricted credentials and filesystem/network access.
-Do not enable it on a shared or untrusted deployment. The combined workload has
-no documented resource minimum and may exceed this container's CPU/RAM limits.
+On the `feature/deepseek-harness` branch, DeepSeek Harness starts automatically
+with ptygate. On first startup it clones the upstream repository into
+`$HOME/.ptygate/deepseek-harness`, installs dependencies and builds the web app;
+later starts update and reuse that checkout. This requires outbound GitHub
+access, Node.js >=24.9, Corepack/pnpm 11.28.5 and enough disk, memory and CPU.
+The first startup can take several minutes. The Harness service is a separate
+loopback-only process; ptygate proxies it at `/ai/` on the panel's existing
+public port and stops it when ptygate shuts down.
 
-When explicitly enabled, deployment automation must clone and build the upstream
-checkout; ptygate will not clone or install Harness itself:
-
-```sh
-git clone https://github.com/deepseek-ai/deepseek-harness "$HOME/deepseek-harness"
-cd "$HOME/deepseek-harness"
-# Requires Node >=24.9 and pnpm 11.28.5
-pnpm install && pnpm run build
-```
-
-Set `DEEPSEEK_HARNESS_ENABLED=1`, `DEEPSEEK_HARNESS_DIR` to that checkout, and
-`DEEPSEEK_HARNESS_PUBLIC_HOST` to the public hostname (optionally with port,
-without scheme or path). `DEEPSEEK_HARNESS_HTTPS` defaults to `1`; set it to `0`
-only when the public route uses plain HTTP. An ephemeral loopback port is chosen
-by default; optionally set `DEEPSEEK_HARNESS_PORT` to an unprivileged local port.
-The child is launched with pnpm and stopped with ptygate. `DEEPSEEK_HARNESS_COMMAND`
-can select a pnpm executable. Startup fails if the child does not become ready.
-The proxy strips `/ai`, preserves the public Host for trusted-host validation,
-rewrites cookie paths and redirects, and forwards the Harness mux WebSocket.
-Harness's launch URL token/session and APIs remain Harness-managed; static files
-are public. ptygate login is not a substitute for Harness authentication.
-
-If the image lacks supported Node/pnpm/build prerequisites or adequate
-resources, use a separate isolated service rather than attempting this in the
-ptygate container.
+The entire `/ai/` route, including assets, APIs and WebSockets, requires a valid
+ptygate login session. Visitors are sent to `/login` first. Harness is also
+experimental and can execute model-generated commands/plugins and access files,
+credentials and the network available to its process. The ptygate login gate
+does not sandbox those capabilities. Use a private deployment and avoid placing
+untrusted workloads or sensitive credentials in the same container.

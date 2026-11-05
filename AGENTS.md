@@ -153,7 +153,7 @@ This is architectural guidance, not a request to implement a router framework
 or move current routes yet. When the first additional app is selected, design
 its route registration, static assets, WebSocket/proxy needs, error handling,
 and resource lifecycle against that concrete app. The server is not currently
-a process supervisor: do not add process management implicitly. Apps may choose
+a general process supervisor. A feature that deliberately adds a managed child app must make startup, readiness, shutdown, authentication, and resource impact explicit; never leave child processes detached. Apps may choose
 their own authentication policy; do not silently expose them under the
 terminal's login or assume shared sessions.
 

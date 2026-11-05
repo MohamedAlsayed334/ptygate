@@ -2,6 +2,8 @@ import { spawn } from "node:child_process";
 import net from "node:net";
 import http from "node:http";
 import { once } from "node:events";
+import fs from "node:fs/promises";
+import path from "node:path";
 
 const PREFIX = "/ai";
 const UPSTREAM_WS = "/api/remote.mux";
@@ -12,7 +14,15 @@ function reject(socket, status, message) {
 }
 
 function forwardedHeaders(req) {
-  return { ...req.headers, host: req.headers.host };
+  const headers = { ...req.headers, host: "127.0.0.1" };
+  if (headers.origin) {
+    try {
+      const origin = new URL(headers.origin);
+      origin.host = "127.0.0.1";
+      headers.origin = origin.toString();
+    } catch { delete headers.origin; }
+  }
+  return headers;
 }
 
 function rewriteResponseHeaders(headers, secure) {
@@ -60,26 +70,49 @@ export function waitReady(child, url, timeoutMs = 90_000) {
   });
 }
 
-export function createDeepSeekHarnessModule({ spawnProcess = spawn } = {}) {
+async function prepareCheckout(checkout, spawnProcess) {
+  await fs.mkdir(path.dirname(checkout), { recursive: true });
+  const git = (args) => run("git", args, { cwd: checkout });
+  const run = (command, args, options = {}) => new Promise((resolve, reject) => {
+    const child = spawnProcess(command, args, { stdio: "inherit", shell: false, ...options });
+    child.once("error", reject);
+    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`${command} ${args[0]} failed (${code})`)));
+  });
+  try {
+    await fs.access(path.join(checkout, ".git"));
+    await git(["-C", checkout, "pull", "--ff-only"]);
+  } catch (error) {
+    if (error.code !== "ENOENT") throw error;
+    await git(["clone", "--depth", "1", "https://github.com/deepseek-ai/deepseek-harness.git", checkout]);
+  }
+  try { await fs.access(path.join(checkout, "node_modules")); }
+  catch { await run("corepack", ["pnpm", "install", "--frozen-lockfile"], { cwd: checkout }); }
+  try { await fs.access(path.join(checkout, "packages/bundle/web-app/dist")); }
+  catch { await run("corepack", ["pnpm", "run", "build"], { cwd: checkout }); }
+  return checkout;
+}
+
+export function createDeepSeekHarnessModule({
+  spawnProcess = spawn,
+  prepare = (checkout) => prepareCheckout(checkout, spawnProcess),
+  selectPort = freeLoopbackPort,
+} = {}) {
   return {
     id: "deepseek-harness",
     prefix: PREFIX,
-    async setup({ http: routes, websocket, health }) {
-      if (process.env.DEEPSEEK_HARNESS_ENABLED !== "1") return;
-      const checkout = process.env.DEEPSEEK_HARNESS_DIR;
-      const publicHost = process.env.DEEPSEEK_HARNESS_PUBLIC_HOST;
-      if (!checkout || !publicHost || !/^(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?)(?:\.(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?))*(?::\d+)?$/i.test(publicHost)) {
-        throw new Error("DeepSeek Harness requires DEEPSEEK_HARNESS_DIR and a valid DEEPSEEK_HARNESS_PUBLIC_HOST");
-      }
-      const rawPort = process.env.DEEPSEEK_HARNESS_PORT;
-      const port = rawPort ? Number(rawPort) : await freeLoopbackPort();
+    async setup({ http: routes, websocket, health, config, services }) {
+      const { authManager } = services;
+      const parseCookies = services.parseCookies;
+      const checkout = path.join(config.homeDir, ".ptygate", "deepseek-harness");
+      await fs.mkdir(config.homeDir, { recursive: true });
+      await prepare(checkout);
+      const port = await selectPort();
       if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("DEEPSEEK_HARNESS_PORT must be a valid unprivileged port");
-      const secure = process.env.DEEPSEEK_HARNESS_HTTPS !== "0";
+      const secure = config.secureCookie;
       const transport = http;
       const origin = `http://127.0.0.1:${port}`;
-      const command = process.env.DEEPSEEK_HARNESS_COMMAND || "pnpm";
-      const args = ["dsh", "web", "--no-open", "--host", "127.0.0.1", "--port", String(port), "--public-url", `${secure ? "https" : "http"}://${publicHost}/ai/`, "--trusted-host", publicHost];
-      const child = spawnProcess(command, args, { cwd: checkout, env: process.env, stdio: "inherit", shell: false });
+      const args = ["pnpm", "dsh", "web", "--no-open", "--host", "127.0.0.1", "--port", String(port), "--trusted-host", "127.0.0.1"];
+      const child = spawnProcess("corepack", args, { cwd: checkout, env: process.env, stdio: "inherit", shell: false });
       let stopping;
       try {
         await waitReady(child, `${origin}/`);
@@ -98,7 +131,16 @@ export function createDeepSeekHarnessModule({ spawnProcess = spawn } = {}) {
         throw error;
       }
 
+      const authenticated = (req, res) => {
+        const sid = parseCookies(req).wt_session;
+        if (authManager.getSession(sid)) return true;
+        res.setHeader("Cache-Control", "no-store");
+        res.writeHead(302, { Location: `/login?returnTo=${encodeURIComponent(req.originalUrl || req.url || "/ai/")}` });
+        res.end();
+        return false;
+      };
       const proxy = (req, res) => {
+        if (!authenticated(req, res)) return;
         if (req.url === "/ai") { res.writeHead(308, { location: "/ai/" }).end(); return; }
         const pathname = req.url || "/";
         const target = pathname === "/ai/" ? "/" : pathname.slice(PREFIX.length) || "/";
@@ -110,15 +152,25 @@ export function createDeepSeekHarnessModule({ spawnProcess = spawn } = {}) {
         req.pipe(client);
       };
       routes.route("GET", "/ai", proxy); routes.route("GET", "/ai/*path", proxy);
+      for (const method of ["POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]) routes.route(method, "/ai", proxy);
       for (const method of ["POST", "PUT", "PATCH", "DELETE", "OPTIONS", "HEAD"]) routes.route(method, `/ai/*path`, proxy);
       websocket.onUpgrade((req, socket, head) => {
         let url;
         try { url = new URL(req.url, `http://${req.headers.host}`); } catch { return reject(socket, 400, "Bad Request"); }
         if (url.pathname !== `${PREFIX}${UPSTREAM_WS}`) return false;
+        const sid = parseCookies(req).wt_session;
+        if (!authManager.getSession(sid)) return reject(socket, 401, "Unauthorized");
         const upstream = net.connect(port, "127.0.0.1", () => {
           const path = `${url.pathname.slice(PREFIX.length)}${url.search}`;
-          const lines = [`GET ${path} HTTP/1.1`, `Host: ${req.headers.host}`, "Connection: Upgrade", "Upgrade: websocket"];
-          for (const [key, value] of Object.entries(req.headers)) if (!["host", "connection", "upgrade"].includes(key.toLowerCase()) && value !== undefined) lines.push(`${key}: ${Array.isArray(value) ? value.join(", ") : value}`);
+          const lines = [`GET ${path} HTTP/1.1`, "Host: 127.0.0.1", "Connection: Upgrade", "Upgrade: websocket"];
+          for (const [key, value] of Object.entries(req.headers)) {
+            const lower = key.toLowerCase();
+            if (!["host", "connection", "upgrade", "origin", "sec-websocket-accept"].includes(lower) && value !== undefined)
+              lines.push(`${key}: ${Array.isArray(value) ? value.join(", ") : value}`);
+            if (lower === "origin" && typeof value === "string") {
+              try { const origin = new URL(value); origin.host = "127.0.0.1"; lines.push(`Origin: ${origin}`); } catch {}
+            }
+          }
           upstream.write(`${lines.join("\r\n")}\r\n\r\n`);
           if (head.length) upstream.write(head);
           socket.pipe(upstream).pipe(socket);
