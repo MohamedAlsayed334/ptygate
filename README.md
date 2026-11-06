@@ -74,7 +74,9 @@ public port and stops it when ptygate shuts down.
 Harness validates the browser-facing hostname. Set
 `DEEPSEEK_HARNESS_TRUSTED_HOSTS` in the hosting panel to the assigned public
 hostname (comma-separated for multiple hostnames); ptygate does not assume a
-fixed deployment domain. The Harness listener remains bound to loopback.
+fixed deployment domain. The first configured hostname is advertised to
+Harness as the public `/ai/` URL; set `COOKIE_SECURE=1` when the browser-facing
+site uses HTTPS. The Harness listener remains bound to loopback.
 
 The entire `/ai/` route, including assets, APIs and WebSockets, requires a valid
 ptygate login session. Visitors are sent to `/login` first. Harness is also
