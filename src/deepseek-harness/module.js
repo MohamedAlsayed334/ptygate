@@ -4,7 +4,6 @@ import http from "node:http";
 import { once } from "node:events";
 import fs from "node:fs/promises";
 import path from "node:path";
-import { pathToFileURL } from "node:url";
 
 const PREFIX = "/ai";
 const UPSTREAM_WS = "/api/remote.mux";
@@ -15,15 +14,9 @@ function reject(socket, status, message) {
 }
 
 function forwardedHeaders(req) {
-  const headers = { ...req.headers, host: "127.0.0.1" };
-  if (headers.origin) {
-    try {
-      const origin = new URL(headers.origin);
-      origin.host = "127.0.0.1";
-      headers.origin = origin.toString();
-    } catch { delete headers.origin; }
-  }
-  return headers;
+  // Harness validates Host and Origin against its trusted public authorities.
+  // The TCP connection remains loopback-only; preserve browser-facing headers.
+  return { ...req.headers };
 }
 
 function rewriteResponseHeaders(headers, secure) {
@@ -69,6 +62,58 @@ export function waitReady(child, url, timeoutMs = 90_000) {
     }, 500);
     const timeout = setTimeout(() => finish(new Error("DeepSeek Harness did not become ready within 90 seconds")), timeoutMs);
   });
+}
+
+export function waitPortReady(child, port, timeoutMs = 90_000) {
+  return new Promise((resolve, reject) => {
+    let done = false;
+    const finish = (error) => {
+      if (done) return;
+      done = true;
+      clearInterval(timer);
+      clearTimeout(timeout);
+      child.off("exit", exited);
+      child.off("error", onError);
+      error ? reject(error) : resolve();
+    };
+    const exited = (code, signal) => finish(new Error(`DeepSeek Harness exited during startup (code ${code}, signal ${signal})`));
+    const onError = (error) => finish(error);
+    child.once("exit", exited);
+    child.once("error", onError);
+    const timer = setInterval(() => {
+      const socket = net.connect(port, "127.0.0.1", () => {
+        socket.destroy();
+        finish();
+      });
+      socket.setTimeout(1000, () => socket.destroy());
+      socket.on("error", () => {});
+    }, 250);
+    const timeout = setTimeout(() => finish(new Error("DeepSeek Harness did not become ready within 90 seconds")), timeoutMs);
+  });
+}
+
+function captureLaunchUrl(child, expectedPort) {
+  let output = "";
+  let launchUrl = null;
+  const inspect = (chunk) => {
+    const text = chunk.toString();
+    output = (output + text).slice(-16_384);
+    const match = output.match(/dsh web:\s*(https?:\/\/127\.0\.0\.1:\d+\/\?token=[^\s]+)/i);
+    if (match) {
+      try {
+        const parsed = new URL(match[1]);
+        if (Number(parsed.port) === expectedPort && parsed.searchParams.has("token")) launchUrl = parsed;
+      } catch {}
+    }
+  };
+  const forward = (stream) => stream?.on("data", (chunk) => {
+    inspect(chunk);
+    const safe = chunk.toString().replace(/(dsh web:\s*https?:\/\/127\.0\.0\.1:\d+\/\?token=)[^\s]+/ig, "$1[redacted]");
+    process.stderr.write(safe);
+  });
+  forward(child.stdout);
+  forward(child.stderr);
+  return () => launchUrl;
 }
 
 async function preparePackage(installDir, spawnProcess) {
@@ -121,11 +166,24 @@ export function createDeepSeekHarnessModule({
       const secure = config.secureCookie;
       const transport = http;
       const origin = `http://127.0.0.1:${port}`;
+      const trustedHosts = (process.env.DEEPSEEK_HARNESS_TRUSTED_HOSTS || "")
+        .split(",").map((host) => host.trim()).filter(Boolean);
       const args = [harness.entry, "web", "--no-open", "--host", "127.0.0.1", "--port", String(port), "--trusted-host", "127.0.0.1"];
-      const child = spawnProcess(process.execPath, args, { cwd: harness.cwd, env: process.env, stdio: "inherit", shell: false });
+      for (const host of trustedHosts) args.push("--trusted-host", host);
+      const child = spawnProcess(process.execPath, args, { cwd: harness.cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"], shell: false });
+      const getLaunchUrl = captureLaunchUrl(child, port);
+      child.stdout?.resume();
+      child.stderr?.resume();
       let stopping;
       try {
-        await waitReady(child, `${origin}/`);
+        const deadline = Date.now() + 90_000;
+        let launchUrl;
+        while (!(launchUrl = getLaunchUrl()) && Date.now() < deadline) {
+          if (child.exitCode !== null || child.signalCode !== null) throw new Error(`DeepSeek Harness exited during startup (code ${child.exitCode}, signal ${child.signalCode})`);
+          await new Promise((resolve) => setTimeout(resolve, 200));
+        }
+        if (!launchUrl) throw new Error("DeepSeek Harness did not print its launch URL within 90 seconds");
+        await waitPortReady(child, port, Math.max(1, deadline - Date.now()));
       } catch (error) {
         if (child.exitCode === null && child.signalCode === null) {
           const exited = once(child, "exit").catch(() => {});
@@ -153,7 +211,13 @@ export function createDeepSeekHarnessModule({
         if (!authenticated(req, res)) return;
         if (req.url === "/ai") { res.writeHead(308, { location: "/ai/" }).end(); return; }
         const pathname = req.url || "/";
-        const target = pathname === "/ai/" ? "/" : pathname.slice(PREFIX.length) || "/";
+        let target = pathname === "/ai/" ? "/" : pathname.slice(PREFIX.length) || "/";
+        const hasHarnessSession = Object.keys(parseCookies(req)).some((name) => name.startsWith("dsh-auth-"));
+        if (pathname === "/ai/" && !hasHarnessSession && !new URLSearchParams(target.split("?")[1] || "").has("token")) {
+          const launchUrl = getLaunchUrl();
+          if (!launchUrl) { res.writeHead(503).end("DeepSeek Harness launch URL unavailable"); return; }
+          target = `/${launchUrl.search}`;
+        }
         const client = transport.request(`${origin}${target}`, { method: req.method, headers: forwardedHeaders(req) }, (upstream) => {
           res.writeHead(upstream.statusCode || 502, rewriteResponseHeaders(upstream.headers, secure));
           upstream.pipe(res);
@@ -172,14 +236,12 @@ export function createDeepSeekHarnessModule({
         if (!authManager.getSession(sid)) return reject(socket, 401, "Unauthorized");
         const upstream = net.connect(port, "127.0.0.1", () => {
           const path = `${url.pathname.slice(PREFIX.length)}${url.search}`;
-          const lines = [`GET ${path} HTTP/1.1`, "Host: 127.0.0.1", "Connection: Upgrade", "Upgrade: websocket"];
+          const lines = [`GET ${path} HTTP/1.1`, `Host: ${req.headers.host || "127.0.0.1"}`, "Connection: Upgrade", "Upgrade: websocket"];
+          if (req.headers.origin) lines.push(`Origin: ${req.headers.origin}`);
           for (const [key, value] of Object.entries(req.headers)) {
             const lower = key.toLowerCase();
             if (!["host", "connection", "upgrade", "origin", "sec-websocket-accept"].includes(lower) && value !== undefined)
               lines.push(`${key}: ${Array.isArray(value) ? value.join(", ") : value}`);
-            if (lower === "origin" && typeof value === "string") {
-              try { const origin = new URL(value); origin.host = "127.0.0.1"; lines.push(`Origin: ${origin}`); } catch {}
-            }
           }
           upstream.write(`${lines.join("\r\n")}\r\n\r\n`);
           if (head.length) upstream.write(head);

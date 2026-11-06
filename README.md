@@ -71,6 +71,10 @@ launched directly with the current Node executable.
 The first startup can take several minutes. The Harness service is a separate
 loopback-only process; ptygate proxies it at `/ai/` on the panel's existing
 public port and stops it when ptygate shuts down.
+Harness validates the browser-facing hostname. Set
+`DEEPSEEK_HARNESS_TRUSTED_HOSTS` in the hosting panel to the assigned public
+hostname (comma-separated for multiple hostnames); ptygate does not assume a
+fixed deployment domain. The Harness listener remains bound to loopback.
 
 The entire `/ai/` route, including assets, APIs and WebSockets, requires a valid
 ptygate login session. Visitors are sent to `/login` first. Harness is also
