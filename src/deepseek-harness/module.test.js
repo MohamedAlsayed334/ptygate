@@ -77,16 +77,18 @@ test("port readiness works when the web entry requires a launch token", async (t
 test("proxy strips prefix, rewrites redirects/cookies, and gates HTTP and WebSocket by session", async (t) => {
   let proxyRequestSeen = false;
   let entryTarget;
+  let forwardedCookie;
   const harnessCookies = [];
   const upstream = createServer((req, res) => {
     if (req.url.startsWith("/?token=")) {
       entryTarget = req.url;
       return res.writeHead(303, { location: "./", "set-cookie": ["dsh-auth-test=session; Path=/; HttpOnly"] }).end();
     }
-    if (req.url === "/") { entryTarget = req.url; return res.writeHead(200).end("Harness UI"); }
+    if (req.url === "/") { entryTarget = req.url; forwardedCookie = req.headers.cookie; return res.writeHead(200).end("Harness UI"); }
     proxyRequestSeen = true;
     assert.equal(req.url, "/thing?q=1");
     assert.equal(req.headers.host, "public.example");
+    forwardedCookie = req.headers.cookie;
     res.writeHead(302, { location: "/next", "set-cookie": ["sid=x; Path=/; HttpOnly"] }).end("ok");
   });
   upstream.listen(0, "127.0.0.1");
@@ -119,7 +121,7 @@ test("proxy strips prefix, rewrites redirects/cookies, and gates HTTP and WebSoc
     const result = await new Promise((resolve, reject) => {
       const res = createServer();
       res.on("request", (req, response) => proxy(req, response));
-      res.listen(0, "127.0.0.1", () => request({ host: "127.0.0.1", port: res.address().port, path: "/ai/thing?q=1", headers: { host: "public.example" } }, (response) => {
+      res.listen(0, "127.0.0.1", () => request({ host: "127.0.0.1", port: res.address().port, path: "/ai/thing?q=1", headers: { host: "public.example", cookie: "wt_session=ptygate-secret; dsh-auth-test=harness-session" } }, (response) => {
         response.resume(); response.on("end", () => { resolve(response); res.close(); });
       }).on("error", reject).end());
     });
@@ -127,6 +129,7 @@ test("proxy strips prefix, rewrites redirects/cookies, and gates HTTP and WebSoc
     assert.equal(proxyRequestSeen, true);
     assert.equal(result.headers.location, "/ai/next");
     assert.match(result.headers["set-cookie"][0], /Path=\/ai\//);
+    assert.equal(forwardedCookie, "dsh-auth-test=harness-session");
     assert.equal(typeof upgradeHandler, "function");
     sessionValid = false;
     const unauthorizedProxyResponse = await new Promise((resolve, reject) => {
@@ -155,6 +158,7 @@ test("proxy strips prefix, rewrites redirects/cookies, and gates HTTP and WebSoc
     });
     assert.equal(postExchangeResponse.statusCode, 200);
     assert.equal(entryTarget, "/");
+    assert.equal(forwardedCookie, harnessCookies[0].split(";")[0]);
     const denied = new PassThrough();
     const upgradeReq = { url: "/ai/api/remote.mux", headers: { host: "example.test" } };
     sessionValid = false;

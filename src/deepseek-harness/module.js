@@ -15,8 +15,15 @@ function reject(socket, status, message) {
 
 function forwardedHeaders(req) {
   // Harness validates Host and Origin against its trusted public authorities.
-  // The TCP connection remains loopback-only; preserve browser-facing headers.
-  return { ...req.headers };
+  // The TCP connection remains loopback-only; preserve browser-facing headers,
+  // but do not disclose ptygate's own session cookie to the child application.
+  const headers = { ...req.headers };
+  if (headers.cookie) {
+    const cookies = headers.cookie.split(";").map((part) => part.trim()).filter((part) => part && !/^wt_session=/i.test(part));
+    if (cookies.length) headers.cookie = cookies.join("; ");
+    else delete headers.cookie;
+  }
+  return headers;
 }
 
 function rewriteResponseHeaders(headers, secure) {
@@ -95,6 +102,7 @@ export function waitPortReady(child, port, timeoutMs = 90_000) {
 function captureLaunchUrl(child, expectedPort) {
   let output = "";
   let launchUrl = null;
+  const pending = new Map();
   const inspect = (chunk) => {
     const text = chunk.toString();
     output = (output + text).slice(-16_384);
@@ -106,11 +114,31 @@ function captureLaunchUrl(child, expectedPort) {
       } catch {}
     }
   };
-  const forward = (stream) => stream?.on("data", (chunk) => {
-    inspect(chunk);
-    const safe = chunk.toString().replace(/(dsh web:\s*https?:\/\/127\.0\.0\.1:\d+\/\?token=)[^\s]+/ig, "$1[redacted]");
-    process.stderr.write(safe);
-  });
+  const forward = (stream) => {
+    if (!stream) return;
+    pending.set(stream, "");
+    stream.on("data", (chunk) => {
+      inspect(chunk);
+      let text = pending.get(stream) + chunk.toString();
+      const lines = text.split(/(?<=\n)/);
+      text = lines.pop() || "";
+      // Keep an incomplete URL/token line buffered so chunk boundaries cannot
+      // bypass redaction. Bound other unterminated output to avoid growth.
+      if (text.length > 16_384 && !/dsh web:\s*https?:\/\/127\.0\.0\.1:\d+\/\?token=/i.test(text)) {
+        process.stderr.write(text.slice(0, -1024));
+        text = text.slice(-1024);
+      }
+      pending.set(stream, text);
+      for (const line of lines) {
+        process.stderr.write(line.replace(/(dsh web:\s*https?:\/\/127\.0\.0\.1:\d+\/\?token=)[^\s]+/ig, "$1[redacted]"));
+      }
+    });
+    stream.on("end", () => {
+      const text = pending.get(stream) || "";
+      process.stderr.write(text.replace(/(dsh web:\s*https?:\/\/127\.0\.0\.1:\d+\/\?token=)[^\s]+/ig, "$1[redacted]"));
+      pending.delete(stream);
+    });
+  };
   forward(child.stdout);
   forward(child.stderr);
   return () => launchUrl;
@@ -172,6 +200,8 @@ export function createDeepSeekHarnessModule({
       for (const host of trustedHosts) args.push("--trusted-host", host);
       const child = spawnProcess(process.execPath, args, { cwd: harness.cwd, env: process.env, stdio: ["ignore", "pipe", "pipe"], shell: false });
       const getLaunchUrl = captureLaunchUrl(child, port);
+      let startupError;
+      child.once("error", (error) => { startupError = error; });
       child.stdout?.resume();
       child.stderr?.resume();
       let stopping;
@@ -179,6 +209,7 @@ export function createDeepSeekHarnessModule({
         const deadline = Date.now() + 90_000;
         let launchUrl;
         while (!(launchUrl = getLaunchUrl()) && Date.now() < deadline) {
+          if (startupError) throw startupError;
           if (child.exitCode !== null || child.signalCode !== null) throw new Error(`DeepSeek Harness exited during startup (code ${child.exitCode}, signal ${child.signalCode})`);
           await new Promise((resolve) => setTimeout(resolve, 200));
         }
@@ -240,6 +271,11 @@ export function createDeepSeekHarnessModule({
           if (req.headers.origin) lines.push(`Origin: ${req.headers.origin}`);
           for (const [key, value] of Object.entries(req.headers)) {
             const lower = key.toLowerCase();
+            if (lower === "cookie" && typeof value === "string") {
+              const cookies = value.split(";").map((part) => part.trim()).filter((part) => part && !/^wt_session=/i.test(part));
+              if (cookies.length) lines.push(`Cookie: ${cookies.join("; ")}`);
+              continue;
+            }
             if (!["host", "connection", "upgrade", "origin", "sec-websocket-accept"].includes(lower) && value !== undefined)
               lines.push(`${key}: ${Array.isArray(value) ? value.join(", ") : value}`);
           }
