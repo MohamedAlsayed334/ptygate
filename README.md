@@ -63,10 +63,11 @@ or root privileges.
 ## DeepSeek Harness
 
 On the `feature/deepseek-harness` branch, DeepSeek Harness starts automatically
-with ptygate. On first startup it clones the upstream repository into
-`$HOME/.ptygate/deepseek-harness`, installs dependencies and builds the web app;
-later starts update and reuse that checkout. This requires outbound GitHub
-access, Node.js >=24.9, Corepack/pnpm 11.28.5 and enough disk, memory and CPU.
+with ptygate. On first startup it installs the published `@deepseek-ai/dsh`
+npm release into `$HOME/.ptygate/deepseek-harness`; later starts reuse that
+install. It does not clone or build the source monorepo. This requires outbound
+npm access, Node.js >=24.9 and enough disk and runtime memory. The package is
+launched directly with the current Node executable.
 The first startup can take several minutes. The Harness service is a separate
 loopback-only process; ptygate proxies it at `/ai/` on the panel's existing
 public port and stops it when ptygate shuts down.

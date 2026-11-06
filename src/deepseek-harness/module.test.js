@@ -15,7 +15,7 @@ test("Harness setup prepares the default checkout without opt-in environment fla
   const upstream = createServer((_req, res) => res.writeHead(204).end());
   let upstreamListening;
   try {
-    const cleanup = await createDeepSeekHarnessModule({ prepare: async (dir) => { prepared = dir; }, spawnProcess: (_cmd, args) => {
+    const cleanup = await createDeepSeekHarnessModule({ prepare: async (dir) => { prepared = dir; return { cwd: dir, entry: "/fake/dsh.js" }; }, spawnProcess: (_cmd, args) => {
       const port = Number(args[args.indexOf("--port") + 1]);
       upstreamListening = new Promise((resolve) => upstream.listen(port, "127.0.0.1", resolve));
       upstreamListening.then(() => { child.kill = (signal) => { child.exitCode = 0; child.signalCode = signal; upstream.close(() => child.emit("exit", null, signal)); }; });
@@ -68,7 +68,7 @@ test("proxy strips prefix, rewrites redirects/cookies, and gates HTTP and WebSoc
   let upgradeHandler;
   let sessionValid = true;
   try {
-    const cleanup = await createDeepSeekHarnessModule({ prepare: async () => {}, selectPort: async () => upstream.address().port, spawnProcess: () => {
+    const cleanup = await createDeepSeekHarnessModule({ prepare: async () => ({ cwd: process.cwd(), entry: "/fake/dsh.js" }), selectPort: async () => upstream.address().port, spawnProcess: () => {
       setTimeout(() => {
         const readiness = request({ host: "127.0.0.1", port: upstream.address().port, path: "/" }, (response) => response.resume());
         readiness.on("error", () => {}); readiness.end();

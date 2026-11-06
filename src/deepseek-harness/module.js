@@ -4,6 +4,7 @@ import http from "node:http";
 import { once } from "node:events";
 import fs from "node:fs/promises";
 import path from "node:path";
+import { pathToFileURL } from "node:url";
 
 const PREFIX = "/ai";
 const UPSTREAM_WS = "/api/remote.mux";
@@ -70,49 +71,58 @@ export function waitReady(child, url, timeoutMs = 90_000) {
   });
 }
 
-async function prepareCheckout(checkout, spawnProcess) {
-  await fs.mkdir(path.dirname(checkout), { recursive: true });
-  const git = (args) => run("git", args, { cwd: checkout });
-  const run = (command, args, options = {}) => new Promise((resolve, reject) => {
-    const child = spawnProcess(command, args, { stdio: "inherit", shell: false, ...options });
-    child.once("error", reject);
-    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`${command} ${args[0]} failed (${code})`)));
-  });
-  try {
-    await fs.access(path.join(checkout, ".git"));
-    await git(["-C", checkout, "pull", "--ff-only"]);
-  } catch (error) {
-    if (error.code !== "ENOENT") throw error;
-    await git(["clone", "--depth", "1", "https://github.com/deepseek-ai/deepseek-harness.git", checkout]);
+async function preparePackage(installDir, spawnProcess) {
+  const [major, minor] = process.versions.node.split(".").map(Number);
+  if (major < 24 || (major === 24 && minor < 9)) {
+    throw new Error(`DeepSeek Harness requires Node.js >=24.9.0; this container runs ${process.versions.node}. Select a Node 24.9+ hosting image, then restart.`);
   }
-  try { await fs.access(path.join(checkout, "node_modules")); }
-  catch { await run("corepack", ["pnpm", "install", "--frozen-lockfile"], { cwd: checkout }); }
-  try { await fs.access(path.join(checkout, "packages/bundle/web-app/dist")); }
-  catch { await run("corepack", ["pnpm", "run", "build"], { cwd: checkout }); }
-  return checkout;
+  await fs.mkdir(installDir, { recursive: true });
+  const env = { ...process.env, PATH: [process.env.PATH, "/usr/local/bin", "/usr/bin", "/bin"].filter(Boolean).join(path.delimiter) };
+  const run = (command, args, options = {}) => new Promise((resolve, reject) => {
+    const child = spawnProcess(command, args, { stdio: "inherit", shell: false, env, ...options });
+    child.once("error", (error) => {
+      if (error.code === "ENOENT") reject(new Error(`Could not find '${command}' in the server PATH (${env.PATH}). Check the hosting panel's startup environment.`));
+      else reject(error);
+    });
+    child.once("exit", (code) => code === 0 ? resolve() : reject(new Error(`${command} ${args[0]} failed with exit code ${code}`)));
+  });
+  const packageJson = path.join(installDir, "package.json");
+  let installedVersion = null;
+  try { installedVersion = JSON.parse(await fs.readFile(packageJson, "utf8")).dependencies?.["@deepseek-ai/dsh"]; } catch {}
+  if (installedVersion !== "0.2.2-rc.1") {
+    await fs.writeFile(packageJson, JSON.stringify({ private: true, type: "module", dependencies: { "@deepseek-ai/dsh": "0.2.2-rc.1" } }, null, 2));
+    await run("npm", ["install", "--omit=dev", "--no-audit", "--no-fund"], { cwd: installDir });
+  }
+  const entry = path.join(installDir, "node_modules", "@deepseek-ai", "dsh", "lib", "bin.js");
+  await fs.access(entry);
+  return { cwd: installDir, entry };
 }
 
 export function createDeepSeekHarnessModule({
   spawnProcess = spawn,
-  prepare = (checkout) => prepareCheckout(checkout, spawnProcess),
+  prepare = (installDir) => preparePackage(installDir, spawnProcess),
   selectPort = freeLoopbackPort,
 } = {}) {
   return {
     id: "deepseek-harness",
     prefix: PREFIX,
     async setup({ http: routes, websocket, health, config, services }) {
+      const [nodeMajor, nodeMinor] = process.versions.node.split(".").map(Number);
+      if (nodeMajor < 24 || (nodeMajor === 24 && nodeMinor < 9)) {
+        throw new Error(`DeepSeek Harness requires Node.js >=24.9.0; this container runs ${process.versions.node}. Select a Node 24.9+ hosting image, then restart.`);
+      }
       const { authManager } = services;
       const parseCookies = services.parseCookies;
-      const checkout = path.join(config.homeDir, ".ptygate", "deepseek-harness");
+      const installDir = path.join(config.homeDir, ".ptygate", "deepseek-harness");
       await fs.mkdir(config.homeDir, { recursive: true });
-      await prepare(checkout);
+      const harness = await prepare(installDir);
       const port = await selectPort();
       if (!Number.isInteger(port) || port < 1024 || port > 65535) throw new Error("DEEPSEEK_HARNESS_PORT must be a valid unprivileged port");
       const secure = config.secureCookie;
       const transport = http;
       const origin = `http://127.0.0.1:${port}`;
-      const args = ["pnpm", "dsh", "web", "--no-open", "--host", "127.0.0.1", "--port", String(port), "--trusted-host", "127.0.0.1"];
-      const child = spawnProcess("corepack", args, { cwd: checkout, env: process.env, stdio: "inherit", shell: false });
+      const args = [harness.entry, "web", "--no-open", "--host", "127.0.0.1", "--port", String(port), "--trusted-host", "127.0.0.1"];
+      const child = spawnProcess(process.execPath, args, { cwd: harness.cwd, env: process.env, stdio: "inherit", shell: false });
       let stopping;
       try {
         await waitReady(child, `${origin}/`);
