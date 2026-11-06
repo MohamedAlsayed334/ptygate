@@ -35,6 +35,7 @@ test("Harness trusts only configured browser authorities and remains loopback-bo
     assert.ok(spawnArgs.includes("ai.example.test"));
     assert.ok(spawnArgs.includes("ai.example.test:24723"));
     assert.equal(spawnArgs[spawnArgs.indexOf("--host") + 1], "127.0.0.1");
+    assert.equal(spawnArgs[spawnArgs.indexOf("--public-url") + 1], "http://ai.example.test:24723/ai/");
     assert.ok(routes.has("/ai/*path"));
     assert.equal(typeof upgrade, "function");
     await cleanup();
@@ -42,6 +43,40 @@ test("Harness trusts only configured browser authorities and remains loopback-bo
     if (previousHosts === undefined) delete process.env.DEEPSEEK_HARNESS_TRUSTED_HOSTS;
     else process.env.DEEPSEEK_HARNESS_TRUSTED_HOSTS = previousHosts;
     if (upstream.listening) upstream.close();
+  }
+});
+
+test("launch URL capture accepts the advertised public URL and token", async () => {
+  const child = new EventEmitter();
+  child.stdout = new PassThrough();
+  child.stderr = new PassThrough();
+  child.exitCode = null;
+  child.signalCode = null;
+  const routes = new Map();
+  const upstream = createServer((_req, res) => res.writeHead(204).end());
+  upstream.listen(0, "127.0.0.1");
+  await once(upstream, "listening");
+  let cleanup;
+  try {
+    cleanup = await createDeepSeekHarnessModule({
+      prepare: async () => ({ cwd: process.cwd(), entry: "/fake/dsh.js" }),
+      selectPort: async () => upstream.address().port,
+      spawnProcess: () => {
+        setTimeout(() => child.stdout.write("dsh web: http://ai.example.test:24723/ai/?token=secret-value\n"), 0);
+        child.kill = (signal) => { child.exitCode = 0; child.signalCode = signal; upstream.close(() => child.emit("exit", null, signal)); };
+        return child;
+      },
+    }).setup({
+      config: { homeDir: process.cwd(), port: 24723, secureCookie: false },
+      services: { authManager: { getSession: () => null }, parseCookies: () => ({}) },
+      http: { route: (_method, route, handler) => routes.set(route, handler) },
+      websocket: { onUpgrade() {} },
+      health: { register() {} },
+    });
+    assert.ok(routes.has("/ai/*path"));
+  } finally {
+    await cleanup?.();
+    if (upstream.listening) await new Promise((resolve) => upstream.close(resolve));
   }
 });
 
