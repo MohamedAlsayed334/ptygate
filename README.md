@@ -73,7 +73,7 @@ does not provide; **panel values always win**.
 ## Pages and endpoints
 
 Everything is served from the same public origin, e.g.
-`https://mohamedalsayed.ccwu.cc`.
+`https://your-domain.example`.
 
 ### Web pages (open in a browser)
 
