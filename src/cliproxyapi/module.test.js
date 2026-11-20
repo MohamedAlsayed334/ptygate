@@ -55,6 +55,7 @@ test("rewriteManagementHtml seeds the /cpa API base before the app loads", () =>
   const html = rewriteManagementHtml("<!doctype html><html><head><title>x</title></head></html>", "/cpa").toString("utf8");
   assert.match(html, /<head><script>/);
   assert.match(html, /var base=location\.origin\+"\/cpa"/);
+  assert.match(html, /\["cli-proxy-auth","isLoggedIn","managementKey"\]/);
   assert.match(html, /setItem\("apiBase",JSON\.stringify\(base\)\)/);
   assert.match(html, /setItem\("apiUrl",JSON\.stringify\(base\)\)/);
   assert.match(html, /<\/script><title>x<\/title>/);
@@ -74,7 +75,7 @@ test("module installs config, proxies /cpa/* with the API key, and forwards WebS
       res.writeHead(200, { "content-type": "application/json" }).end('{"data":[]}');
       return;
     }
-    if (req.url === "/management.html") {
+    if (req.url.startsWith("/management.html")) {
       const body = "<!doctype html><html><head><title>cpa</title></head></html>";
       res.writeHead(200, { "content-type": "text/html", "content-length": Buffer.byteLength(body) }).end(body);
       return;
@@ -181,7 +182,7 @@ test("module installs config, proxies /cpa/* with the API key, and forwards WebS
         {
           host: "127.0.0.1",
           port: proxyServer.address().port,
-          path: `${PREFIX}/management.html`,
+          path: `${PREFIX}/management.html?x=1`,
           headers: { host: "public.example" },
         },
         (response) => {
@@ -195,9 +196,10 @@ test("module installs config, proxies /cpa/* with the API key, and forwards WebS
     });
     assert.equal(page.response.statusCode, 200);
     assert.match(page.body, /var base=location\.origin\+"\/cpa"/);
+    assert.match(page.body, /\["cli-proxy-auth","isLoggedIn","managementKey"\]/);
     assert.match(page.body, /setItem\("apiBase",JSON\.stringify\(base\)\)/);
     assert.equal(page.response.headers["content-length"], String(Buffer.byteLength(page.body)));
-    assert.equal(seenRequest.url, "/management.html");
+    assert.equal(seenRequest.url, "/management.html?x=1");
     assert.equal(seenRequest.headers["accept-encoding"], "identity");
 
     const denied = new PassThrough();

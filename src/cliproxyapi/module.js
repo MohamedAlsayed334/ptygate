@@ -357,7 +357,7 @@ function forwardHeaders(req) {
 // saved API base with the mounted prefix before the app script runs.
 export function rewriteManagementHtml(body, prefix = PREFIX) {
   const text = Buffer.isBuffer(body) ? body.toString("utf8") : String(body);
-  const script = `<script>(function(){try{var base=location.origin+${JSON.stringify(prefix)};localStorage.setItem("apiBase",JSON.stringify(base));localStorage.setItem("apiUrl",JSON.stringify(base));}catch(e){}})();</script>`;
+  const script = `<script>(function(){try{var base=location.origin+${JSON.stringify(prefix)};["cli-proxy-auth","isLoggedIn","managementKey"].forEach(function(k){localStorage.removeItem(k)});localStorage.setItem("apiBase",JSON.stringify(base));localStorage.setItem("apiUrl",JSON.stringify(base));}catch(e){}})();</script>`;
   const patched = /<head[^>]*>/i.test(text) ? text.replace(/<head[^>]*>/i, (tag) => `${tag}${script}`) : `${script}${text}`;
   return Buffer.from(patched, "utf8");
 }
@@ -369,7 +369,9 @@ export function createProxy({ origin, prefix = PREFIX, secure = false }) {
       return;
     }
     const target = req.url.slice(prefix.length) || "/";
-    const isManagementHtml = target === "/management.html";
+    let targetPath = target;
+    try { targetPath = new URL(target, "http://localhost").pathname; } catch { /* use raw target */ }
+    const isManagementHtml = targetPath === "/management.html";
     const headers = forwardHeaders(req);
     if (isManagementHtml) headers["accept-encoding"] = "identity";
     const client = http.request(
