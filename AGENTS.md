@@ -131,6 +131,7 @@ src/                     server and terminal implementation
   http.js                current HTTP routes (/login, /logout, /healthz, assets)
   ws.js                  WebSocket upgrade guard + message pipe + heartbeat
   pty.js                 PTY lifecycle, replay ring buffer, capacity limits
+  cliproxyapi/module.js  CLIProxyAPI gateway: verified auto-install, child lifecycle, /cpa proxy
   ip_policy.js           IP normalization, CIDR matching, private-range allowlist
   console.js             --console local shell bridge
   logger.js              stderr logger with buffering while console owns the tty
