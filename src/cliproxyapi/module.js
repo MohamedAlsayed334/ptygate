@@ -351,6 +351,17 @@ function forwardHeaders(req) {
   return headers;
 }
 
+// The bundled management page derives its API base from window.location.origin.
+// Behind the gateway that is the ptygate origin, not the CLIProxyAPI prefix, so
+// it would call /v8/management/... at the site root and get a 404. Seed its
+// saved API base with the mounted prefix before the app script runs.
+export function rewriteManagementHtml(body, prefix = PREFIX) {
+  const text = Buffer.isBuffer(body) ? body.toString("utf8") : String(body);
+  const script = `<script>(function(){try{var base=location.origin+${JSON.stringify(prefix)};localStorage.setItem("apiBase",JSON.stringify(base));localStorage.setItem("apiUrl",JSON.stringify(base));}catch(e){}})();</script>`;
+  const patched = /<head[^>]*>/i.test(text) ? text.replace(/<head[^>]*>/i, (tag) => `${tag}${script}`) : `${script}${text}`;
+  return Buffer.from(patched, "utf8");
+}
+
 export function createProxy({ origin, prefix = PREFIX, secure = false }) {
   return (req, res) => {
     if (req.url === prefix) {
@@ -358,12 +369,51 @@ export function createProxy({ origin, prefix = PREFIX, secure = false }) {
       return;
     }
     const target = req.url.slice(prefix.length) || "/";
+    const isManagementHtml = target === "/management.html";
+    const headers = forwardHeaders(req);
+    if (isManagementHtml) headers["accept-encoding"] = "identity";
     const client = http.request(
       `${origin}${target}`,
-      { method: req.method, headers: forwardHeaders(req) },
+      { method: req.method, headers },
       (upstream) => {
-        res.writeHead(upstream.statusCode || 502, rewriteHeaders(upstream.headers, prefix, secure));
-        upstream.pipe(res);
+        const responseHeaders = rewriteHeaders(upstream.headers, prefix, secure);
+        if (!isManagementHtml || (upstream.statusCode ?? 500) >= 400) {
+          res.writeHead(upstream.statusCode || 502, responseHeaders);
+          upstream.pipe(res);
+          return;
+        }
+        const chunks = [];
+        let size = 0;
+        let overflowed = false;
+        upstream.on("data", (chunk) => {
+          size += chunk.length;
+          if (size > 16 * 1024 * 1024) {
+            if (!overflowed) {
+              overflowed = true;
+              res.writeHead(upstream.statusCode || 502, responseHeaders);
+              for (const prior of chunks) res.write(prior);
+              chunks.length = 0;
+            }
+            res.write(chunk);
+          } else {
+            chunks.push(chunk);
+          }
+        });
+        upstream.on("error", () => {
+          if (!res.headersSent) res.writeHead(502);
+          res.end();
+        });
+        upstream.on("end", () => {
+          if (overflowed) {
+            res.end();
+            return;
+          }
+          const body = rewriteManagementHtml(Buffer.concat(chunks), prefix);
+          delete responseHeaders["content-encoding"];
+          responseHeaders["content-length"] = String(body.length);
+          res.writeHead(upstream.statusCode || 200, responseHeaders);
+          res.end(body);
+        });
       },
     );
     client.on("error", () => {

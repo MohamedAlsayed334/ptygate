@@ -83,6 +83,11 @@ Everything is served from the same public origin, e.g.
 | Web terminal | `/` | Yes — the login sets a `wt_session` cookie. |
 | CLIProxyAPI management panel | `/cpa/management.html` | The page opens freely, but its API calls need the management key. |
 
+The gateway automatically points the management page at `/cpa/v8/management/...`,
+so just open `/cpa/management.html` and enter the **management key** from the
+startup log. Do not add a separate port or path. The panel is downloaded by
+CLIProxyAPI on first open, so allow a few seconds on the very first load.
+
 ### Endpoints for programs
 
 | Endpoint | Auth needed | What it is |

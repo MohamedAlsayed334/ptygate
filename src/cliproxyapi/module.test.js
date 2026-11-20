@@ -17,6 +17,7 @@ import {
   detectLibc,
   prepareInstall,
   renderConfig,
+  rewriteManagementHtml,
   selectAsset,
   waitReady,
 } from "./module.js";
@@ -50,6 +51,15 @@ test("renderConfig uses the v8 layout with a loopback listener and client key", 
   assert.doesNotMatch(yaml, /^host:/m);
 });
 
+test("rewriteManagementHtml seeds the /cpa API base before the app loads", () => {
+  const html = rewriteManagementHtml("<!doctype html><html><head><title>x</title></head></html>", "/cpa").toString("utf8");
+  assert.match(html, /<head><script>/);
+  assert.match(html, /var base=location\.origin\+"\/cpa"/);
+  assert.match(html, /setItem\("apiBase",JSON\.stringify\(base\)\)/);
+  assert.match(html, /setItem\("apiUrl",JSON\.stringify\(base\)\)/);
+  assert.match(html, /<\/script><title>x<\/title>/);
+});
+
 test("module installs config, proxies /cpa/* with the API key, and forwards WebSocket upgrades", async (t) => {
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "cpa-module-"));
   t.after(() => fs.rm(homeDir, { recursive: true, force: true }));
@@ -59,11 +69,16 @@ test("module installs config, proxies /cpa/* with the API key, and forwards WebS
   let seenSpawnArgs;
   let seenBinary;
   const upstream = createServer((req, res) => {
+    seenRequest = { url: req.url, headers: req.headers };
     if (req.url === "/v1/models") {
       res.writeHead(200, { "content-type": "application/json" }).end('{"data":[]}');
       return;
     }
-    seenRequest = { url: req.url, headers: req.headers };
+    if (req.url === "/management.html") {
+      const body = "<!doctype html><html><head><title>cpa</title></head></html>";
+      res.writeHead(200, { "content-type": "text/html", "content-length": Buffer.byteLength(body) }).end(body);
+      return;
+    }
     res.writeHead(302, {
       location: "/management.html",
       "set-cookie": ["panel=1; Path=/; HttpOnly"],
@@ -133,6 +148,7 @@ test("module installs config, proxies /cpa/* with the API key, and forwards WebS
     const proxyServer = createServer((req, res) => proxy(req, res));
     proxyServer.listen(0, "127.0.0.1");
     await once(proxyServer, "listening");
+    t.after(() => proxyServer.close());
     const result = await new Promise((resolve, reject) => {
       const client = request(
         {
@@ -147,7 +163,7 @@ test("module installs config, proxies /cpa/* with the API key, and forwards WebS
         },
         (response) => {
           response.resume();
-          response.on("end", () => { resolve(response); proxyServer.close(); });
+          response.on("end", () => resolve(response));
         },
       );
       client.on("error", reject);
@@ -159,6 +175,30 @@ test("module installs config, proxies /cpa/* with the API key, and forwards WebS
     assert.equal(seenRequest.url, "/v0/management/config?x=1");
     assert.equal(seenRequest.headers.authorization, `Bearer ${secrets.apiKey}`);
     assert.equal(seenRequest.headers.cookie, "panel=1");
+
+    const page = await new Promise((resolve, reject) => {
+      const client = request(
+        {
+          host: "127.0.0.1",
+          port: proxyServer.address().port,
+          path: `${PREFIX}/management.html`,
+          headers: { host: "public.example" },
+        },
+        (response) => {
+          const chunks = [];
+          response.on("data", (chunk) => chunks.push(chunk));
+          response.on("end", () => resolve({ response, body: Buffer.concat(chunks).toString("utf8") }));
+        },
+      );
+      client.on("error", reject);
+      client.end();
+    });
+    assert.equal(page.response.statusCode, 200);
+    assert.match(page.body, /var base=location\.origin\+"\/cpa"/);
+    assert.match(page.body, /setItem\("apiBase",JSON\.stringify\(base\)\)/);
+    assert.equal(page.response.headers["content-length"], String(Buffer.byteLength(page.body)));
+    assert.equal(seenRequest.url, "/management.html");
+    assert.equal(seenRequest.headers["accept-encoding"], "identity");
 
     const denied = new PassThrough();
     assert.equal(
