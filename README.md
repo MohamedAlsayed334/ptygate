@@ -110,6 +110,9 @@ https://<your-public-origin>/cpa/v1
 Authorization: Bearer <API token>
 ```
 
+For step-by-step client setup (SDKs, OpenCode, management API, and
+troubleshooting), see [CLIENTS.md](CLIENTS.md).
+
 If IP restriction is enabled with `ALLOW_PRIVATE_ONLY=1`, it applies to **every**
 route above, including `/healthz` and `/cpa/*`.
 
