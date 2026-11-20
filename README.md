@@ -44,17 +44,69 @@ the target platform when possible.
 
 ## Settings
 
-Set `TERMINAL_TOKEN` in your hosting panel. The port is normally provided by
-the panel; use `.env` only if your panel does not pass `PORT` or `SERVER_PORT`.
+Set these in the hosting panel. `.env` is only a fallback for values the panel
+does not provide; **panel values always win**.
+
+### Mandatory — set these together
+
+| Setting | Example | Why |
+|---|---|---|
+| `PORT` or `SERVER_PORT` | `24723` | The one port your panel forwards. The app refuses to start without it. |
+| `TERMINAL_TOKEN` | `a-long-random-string` | Password for the web terminal (16+ chars). If unset, a new one is generated on every restart and printed in the log. |
+
+### Optional
 
 | Setting | Default | Purpose |
 |---|---|---|
-| `PORT` / `SERVER_PORT` | Required | Listening port; automatically supplied by most hosting panels. |
-| `HOST` | `0.0.0.0` | Interface to listen on; this is required for typical hosting proxies. |
-| `TERMINAL_TOKEN` | Generated at startup | Login secret; at least 16 characters. |
-| `SHELL_BIN` | `SHELL` or `/bin/bash` | Shell executable to launch. |
-| `ALLOW_PRIVATE_ONLY` | `0` | Set to `1` to restrict clients to private IP ranges. |
-| `COOKIE_SECURE` | Unset | Set to `1` when HTTPS is provided by the host/proxy. |
+| `HOST` | `0.0.0.0` | Interface to listen on; leave as-is for hosting proxies. |
+| `SHELL_BIN` | `SHELL` or `/bin/bash` | Shell used by the terminal. |
+| `ALLOW_PRIVATE_ONLY` | `0` | Set to `1` to restrict **all** routes to private IPs. |
+| `COOKIE_SECURE` | Unset | Set to `1` when the host terminates HTTPS. |
+| `CLIPROXYAPI_PUBLIC_URL` | Log placeholder | Your public origin, e.g. `https://example.com`. Used only in the startup log. |
+| `CLIPROXYAPI_API_KEY` | Auto-generated | Fixed API token for `/cpa/v1/...`. |
+| `CLIPROXYAPI_MANAGEMENT_KEY` | Auto-generated | Fixed key for the management API/panel. |
+| `CLIPROXYAPI_VERSION` | Latest release | Pin a release tag, e.g. `v8.0.80`. |
+| `CLIPROXYAPI_SKIP_UPDATE` | `0` | Set to `1` to reuse the installed binary without checking GitHub. |
+| `CLIPROXYAPI_PORT` | Free port | Fixed loopback port for the child process. |
+| `GITHUB_TOKEN` | Unset | Avoids GitHub API rate limits during release checks. |
+
+## Pages and endpoints
+
+Everything is served from the same public origin, e.g.
+`https://mohamedalsayed.ccwu.cc`.
+
+### Web pages (open in a browser)
+
+| Page | URL | Login needed? |
+|---|---|---|
+| Terminal login | `/login` | No — enter the terminal token here. |
+| Web terminal | `/` | Yes — the login sets a `wt_session` cookie. |
+| CLIProxyAPI management panel | `/cpa/management.html` | The page opens freely, but its API calls need the management key. |
+
+### Endpoints for programs
+
+| Endpoint | Auth needed | What it is |
+|---|---|---|
+| `GET /healthz` | None | Is ptygate up? Returns `ok`. |
+| `GET /cpa/healthz` | None | Is the CLIProxyAPI gateway up? |
+| `GET /api/terminal/metrics` | Terminal session cookie | Container CPU/memory/disk stats. |
+| `/cpa/v1/models` | **API token** (Bearer) | List available models. |
+| `/cpa/v1/chat/completions` | **API token** (Bearer) | Chat completions (OpenAI format). |
+| `/cpa/v1/responses`, `/cpa/v1/messages`, etc. | **API token** (Bearer) | Other provider-compatible formats. |
+| `/cpa/v0/management/*`, `/cpa/v8/management/*` | **Management key** | Accounts, keys, config. |
+| `/ws` | Session cookie + `ptygate.v1` subprotocol | Terminal WebSocket. |
+| `/cpa/v1/realtime`, `/cpa/v1/responses/ws`, etc. | CLIProxyAPI's own auth | WebSocket AI routes (tunnelled). |
+
+A ptygate browser login is **not** needed for `/cpa/v1/...` — use the API token
+from the startup log. Point any OpenAI-compatible client at:
+
+```
+https://<your-public-origin>/cpa/v1
+Authorization: Bearer <API token>
+```
+
+If IP restriction is enabled with `ALLOW_PRIVATE_ONLY=1`, it applies to **every**
+route above, including `/healthz` and `/cpa/*`.
 
 ## CLIProxyAPI gateway (`/cpa/`)
 
@@ -72,31 +124,13 @@ on the **same public port** as the terminal. On startup ptygate:
 
 The first start downloads a ~24 MB binary, so allow a minute or two. If the
 download or child process fails, the terminal keeps running and `/cpa/` returns
-`503` with the reason; the error is also logged. `GET /cpa/healthz` reports the
-gateway's health.
-
-Startup logs print the API base URL and both secrets. Point any OpenAI-compatible
-client at:
-
-```
-https://<your-public-origin>/cpa/v1
-```
-
-and authenticate with `Authorization: Bearer <API token>`. The management panel
-is at `/cpa/management.html` and the management API at `/cpa/v0/management` (key
-required). WebSocket API routes under `/cpa/` are tunnelled as well.
-
-The gateway uses CLIProxyAPI's own API-key authentication; a ptygate browser
-login is **not** required for API calls, so CLI tools can use it from anywhere.
-Keep the token secret — anyone holding it can use your configured AI accounts.
-Logs redact both secrets. Set `CLIPROXYAPI_PUBLIC_URL` so the logged base URL is
-exact; ptygate cannot discover the hosting panel's public hostname.
+`503` with the reason; the error is also logged.
 
 Use the terminal to complete CLIProxyAPI's one-time headless provider logins
 (Gemini, Claude, Codex, etc.) and to add upstream keys through the management
 panel. Credentials are stored under `$HOME` by CLIProxyAPI and survive restarts.
 
-Anyone who can reach the login page can attempt to authenticate. Keep the token
+Anyone who can reach the login page can attempt to authenticate. Keep the tokens
 secret and use HTTPS when your hosting platform provides it. Shell commands run
 with the same permissions as the Node process; this app does not grant `sudo`
 or root privileges.
