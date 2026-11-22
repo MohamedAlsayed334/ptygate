@@ -68,7 +68,13 @@ does not provide; **panel values always win**.
 | `CLIPROXYAPI_VERSION` | Latest release | Pin a release tag, e.g. `v8.0.80`. |
 | `CLIPROXYAPI_SKIP_UPDATE` | `0` | Set to `1` to reuse the installed binary without checking GitHub. |
 | `CLIPROXYAPI_PORT` | Free port | Fixed loopback port for the child process. |
-| `GITHUB_TOKEN` | Unset | Avoids GitHub API rate limits during release checks. |
+| `NINEROUTER_VERSION` | `0.5.119` | Pin the 9router npm package version. |
+| `NINEROUTER_SKIP_UPDATE` | `0` | Set to `1` to reuse an installed 9router package without checking npm. |
+| `NINEROUTER_PORT` | Free port | Fixed loopback port for the 9router child process. |
+| `NINEROUTER_API_KEY` | Auto-created | Reuse an existing 9router API key (must already exist in 9router's database). |
+| `NINEROUTER_INITIAL_PASSWORD` | Auto-generated | Dashboard password used on first 9router startup. |
+| `NINEROUTER_PUBLIC_URL` | Log placeholder | Your public origin, used only in the startup log. |
+| `GITHUB_TOKEN` | Unset | Avoids GitHub API rate limits during CLIProxyAPI release checks. |
 
 ## Pages and endpoints
 
@@ -82,6 +88,7 @@ Everything is served from the same public origin, e.g.
 | Terminal login | `/login` | No — enter the terminal token here. |
 | Web terminal | `/` | Yes — the login sets a `wt_session` cookie. |
 | CLIProxyAPI management panel | `/cpa/management.html` | The page opens freely, but its API calls need the management key. |
+| 9router dashboard | `/9router/dashboard` | Yes — use the 9router dashboard password from the startup log. |
 
 The gateway automatically points the management page at `/cpa/v8/management/...`,
 so just open `/cpa/management.html` and enter the **management key** from the
@@ -94,31 +101,41 @@ CLIProxyAPI on first open, so allow a few seconds on the very first load.
 |---|---|---|
 | `GET /healthz` | None | Is ptygate up? Returns `ok`. |
 | `GET /cpa/healthz` | None | Is the CLIProxyAPI gateway up? |
+| `GET /9router/healthz` | None | Is the 9router gateway up? |
 | `GET /api/terminal/metrics` | Terminal session cookie | Container CPU/memory/disk stats. |
-| `/cpa/v1/models` | **API token** (Bearer) | List available models. |
-| `/cpa/v1/chat/completions` | **API token** (Bearer) | Chat completions (OpenAI format). |
-| `/cpa/v1/responses`, `/cpa/v1/messages`, etc. | **API token** (Bearer) | Other provider-compatible formats. |
-| `/cpa/v0/management/*`, `/cpa/v8/management/*` | **Management key** | Accounts, keys, config. |
+| `/cpa/v1/models` | **CLIProxyAPI API token** (Bearer) | List available models. |
+| `/cpa/v1/chat/completions` | **CLIProxyAPI API token** (Bearer) | Chat completions (OpenAI format). |
+| `/cpa/v1/responses`, `/cpa/v1/messages`, etc. | **CLIProxyAPI API token** (Bearer) | Other provider-compatible formats. |
+| `/cpa/v0/management/*`, `/cpa/v8/management/*` | **CLIProxyAPI management key** | Accounts, keys, config. |
+| `/9router/v1/models` | **9router API token** (Bearer) | List available models. |
+| `/9router/v1/chat/completions` | **9router API token** (Bearer) | Chat completions (OpenAI format). |
+| `/9router/v1/responses`, `/9router/v1/messages`, etc. | **9router API token** (Bearer) | Other formats supported by 9router. |
+| `/9router/api/*` | 9router dashboard session | 9router management API (proxied under the prefix). |
 | `/ws` | Session cookie + `ptygate.v1` subprotocol | Terminal WebSocket. |
 | `/cpa/v1/realtime`, `/cpa/v1/responses/ws`, etc. | CLIProxyAPI's own auth | WebSocket AI routes (tunnelled). |
+| `/9router/ws`, `/9router/responses`, etc. | 9router's own auth | WebSocket routes (tunnelled). |
 
-A ptygate browser login is **not** needed for `/cpa/v1/...` — use the API token
-from the startup log. Point any OpenAI-compatible client at:
+A ptygate browser login is **not** needed for either gateway's `/v1/...` routes —
+use the API token printed for that gateway in the startup log. Point any
+OpenAI-compatible client at one of:
 
 ```
 https://<your-public-origin>/cpa/v1
-Authorization: Bearer <API token>
+Authorization: Bearer <CLIProxyAPI API token>
+
+https://<your-public-origin>/9router/v1
+Authorization: Bearer <9router API token>
 ```
 
-For step-by-step client setup (SDKs, OpenCode, management API, and
+For step-by-step client setup (SDKs, OpenCode, management APIs, and
 troubleshooting), see [CLIENTS.md](CLIENTS.md).
 
 If IP restriction is enabled with `ALLOW_PRIVATE_ONLY=1`, it applies to **every**
-route above, including `/healthz` and `/cpa/*`.
+route above, including `/healthz`, `/cpa/*`, and `/9router/*`.
 
 ## CLIProxyAPI gateway (`/cpa/`)
 
-This branch also mounts [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
+The app mounts [CLIProxyAPI](https://github.com/router-for-me/CLIProxyAPI)
 on the **same public port** as the terminal. On startup ptygate:
 
 1. Downloads the latest verified Linux release asset for the container's CPU and
@@ -138,7 +155,38 @@ Use the terminal to complete CLIProxyAPI's one-time headless provider logins
 (Gemini, Claude, Codex, etc.) and to add upstream keys through the management
 panel. Credentials are stored under `$HOME` by CLIProxyAPI and survive restarts.
 
-Anyone who can reach the login page can attempt to authenticate. Keep the tokens
-secret and use HTTPS when your hosting platform provides it. Shell commands run
-with the same permissions as the Node process; this app does not grant `sudo`
-or root privileges.
+## 9router gateway (`/9router/`)
+
+The app also mounts [9router](https://github.com/decolua/9router) on the same
+public port. On startup ptygate:
+
+1. Installs the pinned npm package into `$HOME/.ptygate/ninerouter/` using a
+   project-local npm prefix — no global install or root access is needed. Set
+   `NINEROUTER_VERSION` to change the pin, or `NINEROUTER_SKIP_UPDATE=1` to reuse
+   the existing package.
+2. Creates a stable machine identity and a private dashboard password in
+   `$HOME/.ptygate/ninerouter/secrets.json` and `data/` (all `0600`). The
+   dashboard password is printed once at startup.
+3. Starts 9router's standalone server on a loopback port with `DATA_DIR` under
+   that install directory, then creates an API key through 9router's local
+   management API. The key is saved in `secrets.json` and printed at startup.
+4. Reverse-proxies `/9router/` to the loopback server. No second port is exposed,
+   and the child dies with ptygate.
+
+The first install downloads a ~60 MB npm package and may build/install SQLite
+runtime files, so allow a few minutes on a cold container. If installation or
+startup fails, the terminal and `/cpa/` keep running; `/9router/` returns `503`
+with the reason and logs it.
+
+Open `/9router/dashboard` with the dashboard password from the startup log to
+add upstream providers. Agents should use the separate API token:
+
+```
+https://<your-public-origin>/9router/v1
+Authorization: Bearer <9router API token>
+```
+
+Anyone who can reach a gateway route can attempt to authenticate to that
+gateway. Keep all tokens and passwords secret and use HTTPS when your hosting
+platform provides it. Shell commands run with the same permissions as the Node
+process; this app does not grant `sudo` or root privileges.

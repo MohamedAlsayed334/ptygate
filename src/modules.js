@@ -2,9 +2,10 @@ import express from "express";
 import { isIpAllowed } from "./ip_policy.js";
 import { createTerminalModule } from "./terminal/module.js";
 import { createCliproxyApiModule } from "./cliproxyapi/module.js";
+import { createNinerouterModule } from "./ninerouter/module.js";
 
 /** Build the host app and register explicitly-owned application modules. */
-export async function createModuleHost(config, services, rootDir, modules = [createTerminalModule(), createCliproxyApiModule()]) {
+export async function createModuleHost(config, services, rootDir, modules = [createTerminalModule(), createCliproxyApiModule(), createNinerouterModule()]) {
   const app = express();
   const reservedPrefixes = new Map([["/healthz", "host"]]);
   app.disable("x-powered-by");

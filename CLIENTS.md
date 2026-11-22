@@ -1,11 +1,13 @@
-# Connecting clients to the CLIProxyAPI gateway
+# Connecting clients to ptygate's model gateways
 
-This guide explains how to use the `/cpa/` gateway from **any** client — a
-terminal command, an SDK, an IDE plugin, or an agent — not just OpenCode.
+This guide explains how to use the `/cpa/` and `/9router/` gateways from **any**
+client — a terminal command, an SDK, an IDE plugin, or an agent — not just
+OpenCode.
 
-ptygate runs CLIProxyAPI as a managed child process and exposes it on the **same
-public port** as the web terminal. There is no second port to expose and no
-separate hostname to configure.
+ptygate runs both gateways as managed child processes and exposes them on the
+**same public port** as the web terminal. There is no second port to expose and
+no separate hostname to configure. Each gateway has its own API token; they are
+not interchangeable.
 
 ---
 
@@ -257,27 +259,137 @@ do not need to type a port or server address in the page.
 
 ---
 
-## 7. Troubleshooting
+## 7. The 9router gateway (`/9router/`)
 
-| Symptom | Cause | Fix |
+9router is a second, independent model gateway. It uses its own API token and
+its own dashboard password; neither works with `/cpa/`.
+
+### What you need
+
+From the ptygate startup log:
+
+| Name | Log line | Used for |
 |---|---|---|
-| `404 Not Found` on `/chat/completions` or `/v1/models` | Base URL is missing `/cpa/v1` | Use `https://<origin>/cpa/v1` |
-| `401 Unauthorized` on `/cpa/v1/...` | Missing/wrong token, or using the management key | Send `Authorization: Bearer <API token>` |
-| `503` from `/cpa/*` | CLIProxyAPI install or child startup failed | Read the startup log; the terminal still works |
-| Models list is empty (`data: []`) | No upstream provider configured yet | Open `/cpa/management.html`, enter the management key, add accounts/keys |
-| OpenCode finds 0 models | Discovery had no Bearer token or wrong discovery endpoint | Add `settings.apiKey` and `modelsDiscovery.endpoint: "/cpa/v1/models"` |
-| Management page says “v8 Management API not found” | Page is calling `/v8/...` at the root | Hard-refresh `/cpa/management.html`; the gateway rewrite should prevent this |
-| First management-page load is slow | CLIProxyAPI downloads its panel on first open | Wait a few seconds and retry |
-| `ALLOW_PRIVATE_ONLY=1` blocks a client | The IP policy applies to every route, including `/cpa/*` | Disable it or allow the client IP |
+| **9router API token** | `9router] API token (Authorization: Bearer ...): <token>` | All `/9router/v1/...` model calls |
+| **Dashboard password** | `9router] Dashboard password: <password>` | `/9router/dashboard` only |
+
+Both are stored in `$HOME/.ptygate/ninerouter/secrets.json` with `0600`
+permissions. The API key is created automatically through 9router's local
+management API on first start.
+
+### API base and verification
+
+```
+https://<your-public-origin>/9router/v1
+Authorization: Bearer <9router API token>
+```
+
+```sh
+export N9_ORIGIN="https://<your-public-origin>"
+export N9_API_TOKEN="<9router API token from the startup log>"
+
+curl "$N9_ORIGIN/9router/healthz"
+
+curl -H "Authorization: Bearer $N9_API_TOKEN" \
+  "$N9_ORIGIN/9router/v1/models"
+
+curl -H "Authorization: Bearer $N9_API_TOKEN" \
+  -H "Content-Type: application/json" \
+  -d '{"model":"<model-id>","messages":[{"role":"user","content":"hi"}]}' \
+  "$N9_ORIGIN/9router/v1/chat/completions"
+```
+
+The same model-discovery caveat applies: if a tool ignores the path in its base
+URL, set its discovery endpoint to the absolute path
+`/9router/v1/models`.
+
+### OpenAI SDK examples
+
+```js
+import OpenAI from "openai";
+
+const client = new OpenAI({
+  baseURL: "https://<your-public-origin>/9router/v1",
+  apiKey: process.env.N9_API_TOKEN,
+});
+```
+
+```python
+from openai import OpenAI
+
+client = OpenAI(
+    base_url="https://<your-public-origin>/9router/v1",
+    api_key="<9router API token>",
+)
+```
+
+### OpenCode
+
+Add a separate provider entry; do not reuse the CLIProxyAPI provider key:
+
+```json
+{
+  "$schema": "https://opencode.ai/config.json",
+  "plugins": ["opencode-models-discovery@2.2.0"],
+  "providers": {
+    "ninerouter": {
+      "name": "9router",
+      "env": ["N9_API_TOKEN"],
+      "package": "@opencode/ai/providers/openai-compatible",
+      "settings": {
+        "baseURL": "https://<your-public-origin>/9router/v1",
+        "apiKey": "{env:N9_API_TOKEN}",
+        "modelsDiscovery": {
+          "enabled": true,
+          "endpoint": "/9router/v1/models",
+          "smartModelName": true,
+          "timeoutMs": 15000
+        }
+      }
+    }
+  }
+}
+```
+
+### Dashboard
+
+Open `https://<your-public-origin>/9router/dashboard` and sign in with the
+dashboard password from the startup log. Use it to add upstream providers and
+keys. It is intentionally separate from the terminal login and the API token.
+
+9router is installed with npm into `$HOME/.ptygate/ninerouter/`, with its data
+under that directory's `data/` folder. Use `NINEROUTER_VERSION` to pin a
+version, `NINEROUTER_SKIP_UPDATE=1` to reuse the installed package, and
+`NINEROUTER_PORT` to fix its loopback port.
 
 ---
 
-## 8. Security notes
+## 8. Troubleshooting
 
-- Keep the API token and management key out of git. Use environment variables.
-- Use HTTPS so Bearer tokens are not sent in clear text.
-- The API token grants model access; the management key grants configuration
-  access. Rotate them by changing `CLIPROXYAPI_API_KEY` /
+| Symptom | Cause | Fix |
+|---|---|---|
+| `404 Not Found` on `/chat/completions` or `/v1/models` | Base URL is missing `/cpa/v1` or `/9router/v1` | Use the full gateway API base |
+| `401 Unauthorized` on `/cpa/v1/...` | Missing/wrong token, or using the management key | Send `Authorization: Bearer <CLIProxyAPI API token>` |
+| `401 Unauthorized` on `/9router/v1/...` | Missing/wrong token, or using the dashboard password | Send `Authorization: Bearer <9router API token>` |
+| `503` from `/cpa/*` or `/9router/*` | Gateway install or child startup failed | Read the startup log; the terminal still works |
+| Models list is empty (`data: []`) | No upstream provider configured yet | Open that gateway's management page and add accounts/keys |
+| OpenCode finds 0 models | Discovery had no Bearer token or wrong discovery endpoint | Add `settings.apiKey` and an absolute `modelsDiscovery.endpoint` |
+| Management page says “v8 Management API not found” | Page is calling `/v8/...` at the root | Hard-refresh `/cpa/management.html`; the gateway rewrite should prevent this |
+| First management-page load is slow | Gateway downloads its panel on first open | Wait a few seconds and retry |
+| `ALLOW_PRIVATE_ONLY=1` blocks a client | The IP policy applies to every route, including `/cpa/*` and `/9router/*` | Disable it or allow the client IP |
+
+---
+
+## 9. Security notes
+
+- Keep every API token, management key, and dashboard password out of git. Use
+  environment variables or the `0600` sidecar files.
+- Use HTTPS so Bearer tokens and dashboard passwords are not sent in clear text.
+- CLIProxyAPI's API token grants model access; its management key grants
+  configuration access. Rotate them by changing `CLIPROXYAPI_API_KEY` /
   `CLIPROXYAPI_MANAGEMENT_KEY` and restarting.
-- CLIProxyAPI runs in the same container as ptygate with the same resource
-  limits. It is not a separate host or a process supervisor.
+- 9router's API token grants model access; its dashboard password grants
+  configuration access. Rotate them through the 9router dashboard or by editing
+  `$HOME/.ptygate/ninerouter/secrets.json` and restarting.
+- Both gateways run in the same container as ptygate with the same resource
+  limits. Neither is a separate host or a process supervisor.
