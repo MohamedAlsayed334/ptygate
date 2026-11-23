@@ -6,6 +6,7 @@ import fs from "node:fs/promises";
 import fsSync from "node:fs";
 import path from "node:path";
 import crypto from "node:crypto";
+import { createRequire } from "node:module";
 
 import { logger } from "../logger.js";
 
@@ -195,6 +196,65 @@ export async function prepareInstall(installDir, options = {}) {
   await fs.writeFile(statePath, `${JSON.stringify(state, null, 2)}\n`);
   log(`[9router] installed 9router@${installedVersion}`);
   return { cwd: path.dirname(serverPath), serverPath, version: installedVersion };
+}
+
+/**
+ * 9router's published tarball omits sql.js' wasm from its bundled app, and its
+ * own CLI repairs that at startup via hooks/sqliteRuntime.js before spawning
+ * custom-server.js with an extended NODE_PATH. We bypass the CLI, so do the
+ * same here; otherwise no SQLite driver is found on Node 24 and every API
+ * route returns 500.
+ */
+export async function prepareChildEnv({ serverPath, dataDir, env = process.env, log = () => {} }) {
+  const packageRoot = path.dirname(path.dirname(serverPath));
+  const hookPath = path.join(packageRoot, "hooks", "sqliteRuntime.js");
+  const childEnv = { ...env, DATA_DIR: dataDir };
+  if (!fsSync.existsSync(hookPath)) return childEnv;
+
+  let hooks;
+  try {
+    hooks = createRequire(path.join(packageRoot, "package.json"))(hookPath);
+  } catch (error) {
+    log(`[9router] could not load SQLite runtime hook: ${error.message}`);
+    return childEnv;
+  }
+
+  // Both hook functions read DATA_DIR from process.env (not from their
+  // arguments). Scope the change so it cannot leak into the rest of ptygate.
+  const previousDataDir = process.env.DATA_DIR;
+  let runtimeEnv = childEnv;
+  try {
+    process.env.DATA_DIR = dataDir;
+    try {
+      hooks.ensureSqliteRuntime?.({ silent: true });
+    } catch (error) {
+      log(`[9router] SQLite runtime self-check failed: ${error.message}`);
+    }
+    try {
+      if (hooks.buildEnvWithRuntime) runtimeEnv = hooks.buildEnvWithRuntime(childEnv);
+    } catch (error) {
+      log(`[9router] could not extend NODE_PATH: ${error.message}`);
+    }
+  } finally {
+    if (previousDataDir === undefined) delete process.env.DATA_DIR;
+    else process.env.DATA_DIR = previousDataDir;
+  }
+
+  // The server resolves the bundled sql.js before NODE_PATH, so mirror the
+  // wasm the hook installs into the runtime dir back into the bundled copy.
+  const bundledWasm = path.join(packageRoot, "app", "node_modules", "sql.js", "dist", "sql-wasm.wasm");
+  if (!fsSync.existsSync(bundledWasm)) {
+    const runtimeWasm = path.join(dataDir, "runtime", "node_modules", "sql.js", "dist", "sql-wasm.wasm");
+    if (fsSync.existsSync(runtimeWasm)) {
+      try {
+        await fs.mkdir(path.dirname(bundledWasm), { recursive: true });
+        await fs.copyFile(runtimeWasm, bundledWasm);
+      } catch (error) {
+        log(`[9router] could not restore sql.js wasm: ${error.message}`);
+      }
+    }
+  }
+  return runtimeEnv;
 }
 
 async function freeLoopbackPort() {
@@ -553,12 +613,18 @@ export function createNinerouterModule({
           throw new Error("9router loopback port must be between 1024 and 65535");
         }
 
+        const runtimeEnv = await prepareChildEnv({
+          serverPath: prepared.serverPath,
+          dataDir: secrets.dataDir,
+          env,
+          log,
+        });
         const tmpDir = path.join(config.homeDir, "tmp");
         await fs.mkdir(tmpDir, { recursive: true }).catch(() => {});
         child = spawnProcess(process.execPath, ["--max-old-space-size=384", prepared.serverPath], {
           cwd: prepared.cwd,
           env: {
-            ...env,
+            ...runtimeEnv,
             PORT: String(port),
             HOSTNAME: "127.0.0.1",
             DATA_DIR: secrets.dataDir,

@@ -13,6 +13,7 @@ import {
   computeCliToken,
   createNinerouterModule,
   ensureIdentity,
+  prepareChildEnv,
   prepareInstall,
   rewriteBody,
   rewriteHeaders,
@@ -152,6 +153,47 @@ test("prepareInstall resolves npm latest to a concrete version before installing
   );
 });
 
+test("prepareChildEnv restores sql.js wasm and extends NODE_PATH without leaking DATA_DIR", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ninerouter-runtime-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const serverPath = path.join(root, "node_modules", "9router", "app", "custom-server.js");
+  const hookPath = path.join(root, "node_modules", "9router", "hooks", "sqliteRuntime.js");
+  const dataDir = path.join(root, "data");
+  const runtimeWasm = path.join(dataDir, "runtime", "node_modules", "sql.js", "dist", "sql-wasm.wasm");
+  const bundledWasm = path.join(root, "node_modules", "9router", "app", "node_modules", "sql.js", "dist", "sql-wasm.wasm");
+  await fs.mkdir(path.dirname(hookPath), { recursive: true });
+  await fs.writeFile(hookPath, `const path = require("node:path");
+module.exports = {
+  ensureSqliteRuntime() {},
+  buildEnvWithRuntime(base) {
+    const runtime = path.join(base.DATA_DIR, "runtime", "node_modules");
+    return { ...base, NODE_PATH: [runtime, base.NODE_PATH].filter(Boolean).join(path.delimiter) };
+  },
+};
+`);
+  await fs.mkdir(path.dirname(runtimeWasm), { recursive: true });
+  await fs.writeFile(runtimeWasm, "wasm");
+
+  const originalDataDir = process.env.DATA_DIR;
+  const env = { NODE_PATH: "/existing" };
+  const result = await prepareChildEnv({ serverPath, dataDir, env, log() {} });
+  assert.equal(process.env.DATA_DIR, originalDataDir);
+  assert.equal(result.DATA_DIR, dataDir);
+  assert.equal(
+    result.NODE_PATH,
+    [path.join(dataDir, "runtime", "node_modules"), "/existing"].join(path.delimiter),
+  );
+  assert.equal(await fs.readFile(bundledWasm, "utf8"), "wasm");
+
+  const missingHook = await prepareChildEnv({
+    serverPath: path.join(root, "missing", "app", "custom-server.js"),
+    dataDir,
+    env,
+    log() {},
+  });
+  assert.equal(missingHook.NODE_PATH, "/existing");
+});
+
 test("module installs routes, creates an API key, proxies and forwards upgrades", async (t) => {
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "ninerouter-module-"));
   t.after(() => fs.rm(homeDir, { recursive: true, force: true }));
@@ -209,6 +251,19 @@ test("module installs routes, creates an API key, proxies and forwards upgrades"
   let preparedDir;
   let cleanup;
   const logs = [];
+  const originalDataDir = process.env.DATA_DIR;
+  const installDir = path.join(homeDir, ".ptygate", "ninerouter");
+  const hookPath = path.join(installDir, "node_modules", "9router", "hooks", "sqliteRuntime.js");
+  await fs.mkdir(path.dirname(hookPath), { recursive: true });
+  await fs.writeFile(hookPath, `const path = require("node:path");
+module.exports = {
+  ensureSqliteRuntime() {},
+  buildEnvWithRuntime(base) {
+    const runtime = path.join(base.DATA_DIR, "runtime", "node_modules");
+    return { ...base, NODE_PATH: [runtime, base.NODE_PATH].filter(Boolean).join(path.delimiter) };
+  },
+};
+`);
   try {
     cleanup = await createNinerouterModule({
       prepare: async (dir) => {
@@ -240,6 +295,8 @@ test("module installs routes, creates an API key, proxies and forwards upgrades"
     assert.equal(seenSpawnEnv.PORT, String(port));
     assert.equal(seenSpawnEnv.HOSTNAME, "127.0.0.1");
     assert.match(seenSpawnEnv.DATA_DIR, /ninerouter\/data$/);
+    assert.match(seenSpawnEnv.NODE_PATH, /ninerouter\/data\/runtime\/node_modules/);
+    assert.equal(process.env.DATA_DIR, originalDataDir);
     assert.ok(seenSpawnEnv.INITIAL_PASSWORD);
     assert.ok(routes.has(`GET ${PREFIX}/*path`));
     assert.equal(typeof upgradeHandler, "function");
