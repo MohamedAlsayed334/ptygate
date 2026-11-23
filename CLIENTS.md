@@ -358,9 +358,11 @@ dashboard password from the startup log. Use it to add upstream providers and
 keys. It is intentionally separate from the terminal login and the API token.
 
 9router is installed with npm into `$HOME/.ptygate/ninerouter/`, with its data
-under that directory's `data/` folder. Use `NINEROUTER_VERSION` to pin a
-version, `NINEROUTER_SKIP_UPDATE=1` to reuse the installed package, and
-`NINEROUTER_PORT` to fix its loopback port.
+under that directory's `data/` folder. It follows npm's `latest` tag by default;
+use `NINEROUTER_VERSION` to pin a tested version, `NINEROUTER_SKIP_UPDATE=1` to
+reuse the installed package without checking npm, and `NINEROUTER_PORT` to fix
+its loopback port. CLIProxyAPI similarly follows GitHub's latest release unless
+`CLIPROXYAPI_VERSION` or `CLIPROXYAPI_SKIP_UPDATE` is set.
 
 ---
 

@@ -10,7 +10,8 @@ import crypto from "node:crypto";
 import { logger } from "../logger.js";
 
 export const PREFIX = "/9router";
-const DEFAULT_VERSION = "0.5.119";
+const DEFAULT_VERSION = "latest";
+const LATEST_URL = "https://registry.npmjs.org/9router/latest";
 const STARTUP_TIMEOUT_MS = 90_000;
 const REQUEST_TIMEOUT_MS = 15_000;
 const REWRITE_LIMIT = 8 * 1024 * 1024;
@@ -93,6 +94,19 @@ function runCommand(command, args, options, spawnProcess) {
   });
 }
 
+/** Resolve the npm `latest` dist-tag to a concrete version so state stays truthful. */
+export async function resolveLatestVersion(fetchImpl = globalThis.fetch) {
+  const response = await fetchImpl(LATEST_URL, {
+    headers: { accept: "application/json", "user-agent": "ptygate-ninerouter-installer" },
+  });
+  if (!response.ok) throw new Error(`Could not fetch 9router version info (HTTP ${response.status})`);
+  const body = await response.json();
+  if (!body?.version || typeof body.version !== "string") {
+    throw new Error("npm registry did not return a 9router version");
+  }
+  return body.version;
+}
+
 /**
  * Install the published npm package into HOME so ptygate never needs a global
  * npm prefix. An existing install is reused when it matches the pinned version
@@ -101,10 +115,11 @@ function runCommand(command, args, options, spawnProcess) {
 export async function prepareInstall(installDir, options = {}) {
   const {
     env = process.env,
+    fetchImpl = globalThis.fetch,
     spawnProcess = spawn,
     log = (...args) => logger.log(...args),
   } = options;
-  const version = env.NINEROUTER_VERSION || DEFAULT_VERSION;
+  const requested = env.NINEROUTER_VERSION || DEFAULT_VERSION;
   const skipUpdate = env.NINEROUTER_SKIP_UPDATE === "1";
   const serverPath = path.join(installDir, "node_modules", "9router", "app", "custom-server.js");
   const statePath = path.join(installDir, "install.json");
@@ -123,8 +138,24 @@ export async function prepareInstall(installDir, options = {}) {
     (stat) => stat.isFile(),
     () => false,
   );
+  if (installed && skipUpdate) {
+    return { cwd: path.dirname(serverPath), serverPath, version: state.version || requested };
+  }
+
+  let version = requested;
+  let versionCheckFailed = false;
+  if (requested === "latest") {
+    try {
+      version = await resolveLatestVersion(fetchImpl);
+    } catch (error) {
+      if (!installed) throw new Error(`Could not resolve latest 9router version: ${error.message}`);
+      versionCheckFailed = true;
+      version = state.version || requested;
+      log(`[9router] latest-version check failed, reusing installed package: ${error.message}`);
+    }
+  }
   const upToDate = installed &&
-    (skipUpdate || (state.version === version && state.arch === process.arch));
+    (versionCheckFailed || (state.arch === process.arch && state.version === version));
 
   if (upToDate) {
     return { cwd: path.dirname(serverPath), serverPath, version: state.version || version };
@@ -434,7 +465,8 @@ async function ensureApiKey(installDir, identity, port, env, log) {
 
 export function createNinerouterModule({
   spawnProcess = spawn,
-  prepare = (installDir, options) => prepareInstall(installDir, { spawnProcess, ...options }),
+  fetchImpl = globalThis.fetch,
+  prepare = (installDir, options) => prepareInstall(installDir, { spawnProcess, fetchImpl, ...options }),
   selectPortNumber = selectPort,
   log = (...args) => logger.log(...args),
   env = process.env,

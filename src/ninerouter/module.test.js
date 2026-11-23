@@ -115,6 +115,43 @@ test("prepareInstall reuses a matching installation without running npm", async 
   assert.equal(spawned, 0);
 });
 
+test("prepareInstall resolves npm latest to a concrete version before installing", async (t) => {
+  const root = await fs.mkdtemp(path.join(os.tmpdir(), "ninerouter-latest-"));
+  t.after(() => fs.rm(root, { recursive: true, force: true }));
+  const installDir = path.join(root, "install");
+  const serverPath = path.join(installDir, "node_modules", "9router", "app", "custom-server.js");
+  let installArgs;
+  let fetched = 0;
+
+  const result = await prepareInstall(installDir, {
+    env: {},
+    fetchImpl: async (url) => {
+      fetched += 1;
+      assert.match(url, /registry\.npmjs\.org\/9router\/latest$/);
+      return { ok: true, json: async () => ({ version: "9.9.9" }) };
+    },
+    spawnProcess: (_command, args) => {
+      installArgs = args;
+      const child = new EventEmitter();
+      setImmediate(async () => {
+        await fs.mkdir(path.dirname(serverPath), { recursive: true });
+        await fs.writeFile(serverPath, "// installed\n");
+        child.emit("exit", 0);
+      });
+      return child;
+    },
+    log() {},
+  });
+
+  assert.equal(fetched, 1);
+  assert.ok(installArgs.includes("9router@9.9.9"));
+  assert.equal(result.version, "9.9.9");
+  assert.match(
+    await fs.readFile(path.join(installDir, "install.json"), "utf8"),
+    /"version": "9\.9\.9"/,
+  );
+});
+
 test("module installs routes, creates an API key, proxies and forwards upgrades", async (t) => {
   const homeDir = await fs.mkdtemp(path.join(os.tmpdir(), "ninerouter-module-"));
   t.after(() => fs.rm(homeDir, { recursive: true, force: true }));

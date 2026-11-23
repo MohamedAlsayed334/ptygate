@@ -68,7 +68,7 @@ does not provide; **panel values always win**.
 | `CLIPROXYAPI_VERSION` | Latest release | Pin a release tag, e.g. `v8.0.80`. |
 | `CLIPROXYAPI_SKIP_UPDATE` | `0` | Set to `1` to reuse the installed binary without checking GitHub. |
 | `CLIPROXYAPI_PORT` | Free port | Fixed loopback port for the child process. |
-| `NINEROUTER_VERSION` | `0.5.119` | Pin the 9router npm package version. |
+| `NINEROUTER_VERSION` | `latest` | Follow npm's latest 9router release, or pin a tested version such as `0.5.123`. |
 | `NINEROUTER_SKIP_UPDATE` | `0` | Set to `1` to reuse an installed 9router package without checking npm. |
 | `NINEROUTER_PORT` | Free port | Fixed loopback port for the 9router child process. |
 | `NINEROUTER_API_KEY` | Auto-created | Reuse an existing 9router API key (must already exist in 9router's database). |
@@ -160,10 +160,12 @@ panel. Credentials are stored under `$HOME` by CLIProxyAPI and survive restarts.
 The app also mounts [9router](https://github.com/decolua/9router) on the same
 public port. On startup ptygate:
 
-1. Installs the pinned npm package into `$HOME/.ptygate/ninerouter/` using a
-   project-local npm prefix — no global install or root access is needed. Set
-   `NINEROUTER_VERSION` to change the pin, or `NINEROUTER_SKIP_UPDATE=1` to reuse
-   the existing package.
+1. Installs the npm package into `$HOME/.ptygate/ninerouter/` using a
+   project-local npm prefix — no global install or root access is needed. By
+   default it resolves npm's `latest` tag on every start and only reinstalls
+   when the version changes. Set `NINEROUTER_VERSION` to pin a tested release,
+   or `NINEROUTER_SKIP_UPDATE=1` to reuse the existing package without checking
+   npm.
 2. Creates a stable machine identity and a private dashboard password in
    `$HOME/.ptygate/ninerouter/secrets.json` and `data/` (all `0600`). The
    dashboard password is printed once at startup.
@@ -185,6 +187,31 @@ add upstream providers. Agents should use the separate API token:
 https://<your-public-origin>/9router/v1
 Authorization: Bearer <9router API token>
 ```
+
+### Checking gateway versions
+
+ptygate records the version it installed for both gateways:
+
+```sh
+cat "$HOME/.ptygate/ninerouter/install.json"
+cat "$HOME/.ptygate/cliproxyapi/install.json"
+```
+
+Compare those with the current upstream releases:
+
+```sh
+npm view 9router version
+
+curl -fsSL https://api.github.com/repos/router-for-me/CLIProxyAPI/releases/latest |
+  node -e 'let s="";process.stdin.on("data",d=>s+=d).on("end",()=>console.log(JSON.parse(s).tag_name))'
+```
+
+If an installed version is behind, restart ptygate. 9router resolves npm's
+`latest` tag at startup; CLIProxyAPI checks GitHub's latest release at startup.
+Make sure `NINEROUTER_SKIP_UPDATE` and `CLIPROXYAPI_SKIP_UPDATE` are not set to
+`1`, otherwise ptygate deliberately keeps the installed version. To force a
+tested version instead, set `NINEROUTER_VERSION` or `CLIPROXYAPI_VERSION` and
+restart.
 
 Anyone who can reach a gateway route can attempt to authenticate to that
 gateway. Keep all tokens and passwords secret and use HTTPS when your hosting
