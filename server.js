@@ -62,6 +62,13 @@ const services = {
 const host = await createModuleHost(config, services, __dirname);
 const app = host.app;
 server.on("request", app);
+server.on("upgrade", (req, socket, head) => {
+  if (socket.destroyed || wsHandler.didHandle(socket)) return;
+  if (host.handleUpgrade(req, socket, head)) return;
+  if (!socket.destroyed) {
+    socket.end("HTTP/1.1 404 Not Found\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+  }
+});
 
 server.listen(config.port, config.host, () => {
   logger.log(`Web terminal listening on ${config.host}:${config.port}`);

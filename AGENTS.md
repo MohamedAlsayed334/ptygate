@@ -125,48 +125,50 @@ Best practices:
 
 ```
 server.js                entry point (configuration, app wiring, startup)
-src/                     server and terminal implementation
+src/                     server and application implementation
   config.js              CLI/environment configuration
   auth.js                sessions, cookie formatting, token comparison, login lockout
-  http.js                current HTTP routes (/login, /logout, /healthz, assets)
+  modules.js             route-ownership host for HTTP, WebSocket, health and cleanup
+  terminal/module.js     browser terminal routes, assets, metrics and /ws
+  ninerouter/module.js   9router gateway: npm install, child lifecycle, /9router proxy
   ws.js                  WebSocket upgrade guard + message pipe + heartbeat
   pty.js                 PTY lifecycle, replay ring buffer, capacity limits
   ip_policy.js           IP normalization, CIDR matching, private-range allowlist
   console.js             --console local shell bridge
   logger.js              stderr logger with buffering while console owns the tty
 public/                  login page + xterm.js terminal UI
+CLIENTS.md               9router client setup guide
 ```
 
-Current npm scripts: `npm start` for the hosted server and `npm run dev` for
-local development. Do not assume removed contract or environment-report scripts
-exist.
+Current npm scripts: `npm start` for the hosted server, `npm run dev` for local
+development, and `npm test` for module unit tests. Do not assume removed
+contract or environment-report scripts exist.
 
-### Future app routing
+### App routing
 
-The current product is a browser terminal. The intended direction is to grow
-this into one server that mounts independently organized apps under named URL
-prefixes (for example, `/terminal/` and a future `/ai/`). Keep `npm start` and
-the single hosting-panel port as the stable entry point. New app routes should
-be composed as route modules, not mixed into a monolithic HTTP handler.
+`src/modules.js` mounts independently owned apps on the single hosting-panel
+port. The terminal owns `/`, `/login`, `/logout`, `/assets/*`,
+`/api/terminal/metrics`, and `/ws`; 9router owns `/9router/*`, including its
+dashboard, API, and WebSocket upgrades. `/healthz` belongs to the host. New
+apps should follow the route-module pattern, declare their own cleanup, and not
+mix routes into `server.js`.
 
-This is architectural guidance, not a request to implement a router framework
-or move current routes yet. When the first additional app is selected, design
-its route registration, static assets, WebSocket/proxy needs, error handling,
-and resource lifecycle against that concrete app. The server is not currently
-a process supervisor: do not add process management implicitly. Apps may choose
-their own authentication policy; do not silently expose them under the
-terminal's login or assume shared sessions.
+9router runs as a managed child process started by its module: a project-local
+npm install lives under `$HOME/.ptygate/ninerouter/`, and the child listens on a
+private loopback port. The server manages only the children it explicitly
+starts; it is not a general process supervisor. Gateway authentication is
+independent of terminal sessions: do not silently expose gateway routes under
+the terminal login or assume shared sessions.
 
-Apps running in the same container can share the one externally routed port
-through this server, but are constrained by the hosting container's resources.
-A route module alone does not run an independent app process. If a future app
-needs a local service (including model inference), assess provider support,
-CPU/RAM/storage limits, and how that service is started before promising it can
-run here. A separate-host app would require a deliberate proxy/network design;
-it is not implied by this same-container plan.
+Apps running in the same container share the one externally routed port and the
+container's CPU/RAM/storage limits. Before adding a local service (including
+model inference), assess provider support and startup requirements. A
+separate-host app would require a deliberate proxy/network design; it is not
+implied by this same-container plan.
 
 Documentation status:
 - `README.md` — public, committed, keep up to date.
+- `CLIENTS.md` — public 9router client guide, keep in sync with gateway routes.
 - Keep this file aligned with the actual repository and deployment model;
   remove obsolete instructions rather than preserving them as assumed workflows.
 

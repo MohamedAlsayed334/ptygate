@@ -1,9 +1,10 @@
 import express from "express";
 import { isIpAllowed } from "./ip_policy.js";
 import { createTerminalModule } from "./terminal/module.js";
+import { createNinerouterModule } from "./ninerouter/module.js";
 
 /** Build the host app and register explicitly-owned application modules. */
-export async function createModuleHost(config, services, rootDir, modules = [createTerminalModule()]) {
+export async function createModuleHost(config, services, rootDir, modules = [createTerminalModule(), createNinerouterModule()]) {
   const app = express();
   const reservedPrefixes = new Map([["/healthz", "host"]]);
   app.disable("x-powered-by");
@@ -20,6 +21,7 @@ export async function createModuleHost(config, services, rootDir, modules = [cre
     ["GET /healthz", "host"],
   ]);
   const wsRoutes = new Map();
+  const upgradeHandlers = [];
   const cleanups = [];
   for (const mod of modules) {
     if (!mod || typeof mod.id !== "string" || !mod.id || ids.has(mod.id)) throw new Error(`Invalid or duplicate app module id: ${mod?.id}`);
@@ -91,6 +93,9 @@ export async function createModuleHost(config, services, rootDir, modules = [cre
         wsRoutes.set(route, mod.id);
         registeredWebSockets.push(route);
         services.registerWebSocket(route, handler, mod.id);
+      }, onUpgrade(handler) {
+        if (typeof handler !== "function") throw new TypeError(`Module ${mod.id} upgrade handler must be a function`);
+        upgradeHandlers.push(handler);
       } }),
       health: Object.freeze({ register(handler) {
         if (typeof handler !== "function") throw new TypeError(`Module ${mod.id} health check must be a function`);
@@ -127,6 +132,16 @@ export async function createModuleHost(config, services, rootDir, modules = [cre
   app.use((_req, res) => res.status(404).type("text/plain").send("Not Found"));
   return {
     app,
+    handleUpgrade(req, socket, head) {
+      if (!isIpAllowed(req.socket.remoteAddress, config)) {
+        socket.end("HTTP/1.1 403 Forbidden\r\nConnection: close\r\nContent-Length: 0\r\n\r\n");
+        return true;
+      }
+      for (const handler of upgradeHandlers) {
+        if (handler(req, socket, head) === true) return true;
+      }
+      return false;
+    },
     async close() {
       for (const cleanup of cleanups.reverse()) await cleanup();
     },

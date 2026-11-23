@@ -30,6 +30,7 @@ function rejectUpgrade(socket, code, text, headers = {}) {
 export function setupWebSocket(server, config, authManager, ptyManager) {
   const handlers = new Map();
   const activeRoutes = new Set();
+  const handledSockets = new WeakSet();
   const wss = new WebSocketServer({
     noServer: true,
     maxPayload: config.maxInputBytes,
@@ -39,11 +40,14 @@ export function setupWebSocket(server, config, authManager, ptyManager) {
     try {
       const route = new URL(req.url, `http://${req.headers.host || "localhost"}`).pathname;
       const registered = handlers.get(route);
-      if (!registered) return rejectUpgrade(socket, 404, "Not Found");
+      // Unknown routes may belong to another module's upgrade handler.
+      if (!registered) return;
+      handledSockets.add(socket);
       if (!activeRoutes.has(route)) return rejectUpgrade(socket, 503, "Service Unavailable");
       if (!isIpAllowed(req.socket.remoteAddress, config)) return rejectUpgrade(socket, 403, "Forbidden");
       registered.handler(req, socket, head);
     } catch (err) {
+      handledSockets.add(socket);
       logger.log(`[ws] upgrade exception: ${err?.message || err}`);
       rejectUpgrade(socket, 400, "Bad Request");
     }
@@ -258,6 +262,7 @@ export function setupWebSocket(server, config, authManager, ptyManager) {
       if (handlers.has(route)) activeRoutes.add(route);
     },
     terminalHandler(req, socket, head) { handleUpgrade(req, socket, head); },
+    didHandle: (socket) => handledSockets.has(socket),
     close: () => {
       clearInterval(heartbeatTimer);
       for (const client of wss.clients) {
